@@ -2040,7 +2040,9 @@ def import_json_fast(
         db.connection.execute("DELETE FROM mod_deltas WHERE mod_id = ?", (mod_id,))
         # Clear disabled_patches on reimport — indices may not match new version
         db.connection.execute(
-            "UPDATE mods SET json_source = ?, game_version_hash = ?, disabled_patches = NULL WHERE id = ?",
+            "UPDATE mods SET json_source = ?, game_version_hash = ?, "
+            "disabled_patches = NULL, last_apply_skipped_count = 0, "
+            "last_apply_skip_summary = NULL WHERE id = ?",
             (str(json_dest), game_ver_hash, mod_id))
     else:
         cursor = db.connection.execute(
