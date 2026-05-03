@@ -273,6 +273,14 @@ def expand_format3_into_aggregated(
                     f"from this game version's table."
                 )
             continue
+        # Stamp _target_file on the merged change so byte-mismatch
+        # skips reach the badge tooltip with the asset name attached.
+        # Per-mod _source_mod_id attribution is genuinely ambiguous
+        # here (one merged change represents N mods' intents), and
+        # stays deferred. The contributing-mods InfoBar warning
+        # already names the mods involved when extraction fails.
+        for c in changes:
+            c["_target_file"] = target
         aggregated.setdefault(target, []).extend(changes)
         for c in changes:
             n_bytes_changed += len(c.get("patched", "")) // 2
