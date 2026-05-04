@@ -156,18 +156,94 @@ class Format3Validation:
 # ── Parsing ─────────────────────────────────────────────────────────
 
 
-def parse_format3_mod(path: Path) -> tuple[str, list[Format3Intent]]:
-    """Read and validate the structural shape of a Format 3 file.
+def _parse_intents_block(
+    raw_intents, label: str = "intents",
+) -> list[Format3Intent]:
+    """Validate a raw intents list and produce Format3Intent objects.
 
-    Returns ``(target, intents)``. Raises ``ValueError`` with a
-    user-facing message when the file is malformed — the importer
-    surfaces those messages directly.
+    Shared between the legacy single-target ``intents`` block and
+    each per-target block under the newer ``targets: [...]`` shape.
+    The error messages name the offending block via ``label`` so the
+    user can locate the problem in a multi-target file.
+    """
+    if not isinstance(raw_intents, list):
+        raise ValueError(
+            f"Format 3 {label} is missing an intents list"
+        )
+
+    intents: list[Format3Intent] = []
+    for i, raw in enumerate(raw_intents):
+        if not isinstance(raw, dict):
+            raise ValueError(
+                f"{label} intent #{i} is not a JSON object"
+            )
+        # NattKh's newer skill .field.json variant drops 'op' since
+        # 'set' is implicit. We default to 'set' when absent. GitHub
+        # #66.
+        for required in ("entry", "key", "field"):
+            if required not in raw:
+                raise ValueError(
+                    f"{label} intent #{i} is missing required key "
+                    f"'{required}'"
+                )
+        if "new" not in raw:
+            raise ValueError(
+                f"{label} intent #{i} is missing 'new' "
+                f"(the value to set)"
+            )
+        # ``key`` is the record id , silently coercing strings or
+        # truncating floats would silently target a wrong record.
+        # Booleans pass isinstance(int), so reject explicitly.
+        raw_key = raw["key"]
+        if isinstance(raw_key, bool) or not isinstance(raw_key, int):
+            raise ValueError(
+                f"{label} intent #{i} has non-integer key "
+                f"{raw_key!r}, key must be an integer record id"
+            )
+        intents.append(Format3Intent(
+            entry=str(raw["entry"]),
+            key=raw_key,
+            field=str(raw["field"]),
+            op=str(raw.get("op", "set")),
+            new=raw["new"],
+        ))
+    return intents
+
+
+def parse_format3_mod_targets(
+    path: Path,
+) -> list[tuple[str, list[Format3Intent]]]:
+    """Read a Format 3 file and return one (target, intents) pair per
+    target the mod ships.
+
+    Accepts BOTH dialects of the Field-JSON v3 spec:
+
+    * **Singular** (original spec, FIELD_JSON_V3_SPEC.md from NattKh
+      2026-04-24)::
+
+          {"format": 3, "target": "iteminfo.pabgb",
+           "intents": [...]}
+
+    * **Plural** (NattKh's newer multi-target export, e.g. Adfaz
+      Double Resource Buff)::
+
+          {"format": 3,
+           "targets": [
+             {"file": "buffinfo.pabgb", "intents": [...]},
+             {"file": "iteminfo.pabgb", "intents": [...]}
+           ]}
+
+    The plural shape is normalized to a list of pairs so apply-time
+    code can iterate uniformly. The singular shape returns a 1-pair
+    list.
+
+    Raises ``ValueError`` with a user-facing message on any
+    structural problem , the importer surfaces those messages
+    directly.
     """
     try:
         # utf-8-sig transparently strips a UTF-8 BOM. Mod files
-        # authored on Windows in Notepad save with BOM by default;
-        # without this they'd raise a confusing "Unexpected UTF-8
-        # BOM" error here. Iteration 10 systematic-debugging finding.
+        # authored on Windows in Notepad save with BOM by default.
         with open(path, "r", encoding="utf-8-sig") as f:
             data = json.load(f)
     except (OSError, ValueError, UnicodeDecodeError) as e:
@@ -179,58 +255,78 @@ def parse_format3_mod(path: Path) -> tuple[str, list[Format3Intent]]:
             "\"format\": 3 marker"
         )
 
-    target = data.get("target")
-    if not isinstance(target, str) or not target:
+    has_singular = "target" in data
+    has_plural = "targets" in data
+    if has_singular and has_plural:
         raise ValueError(
-            "Format 3 file is missing a \"target\" string "
-            "(should name the .pabgb file the mod modifies)"
+            "Format 3 file has BOTH 'target' (singular) and "
+            "'targets' (plural) keys, only one shape is allowed"
+        )
+    if not has_singular and not has_plural:
+        raise ValueError(
+            "Format 3 file is missing a \"target\" string or a "
+            "\"targets\" list "
+            "(should name the .pabgb file(s) the mod modifies)"
         )
 
-    raw_intents = data.get("intents")
-    if not isinstance(raw_intents, list):
+    if has_singular:
+        target = data.get("target")
+        if not isinstance(target, str) or not target:
+            raise ValueError(
+                "Format 3 \"target\" must be a non-empty string "
+                "naming the .pabgb file the mod modifies"
+            )
+        intents = _parse_intents_block(data.get("intents"), label="intents")
+        return [(target, intents)]
+
+    raw_targets = data.get("targets")
+    if not isinstance(raw_targets, list):
         raise ValueError(
-            "Format 3 file is missing an \"intents\" list"
+            "Format 3 \"targets\" must be a list of "
+            "{file, intents} entries"
+        )
+    if not raw_targets:
+        raise ValueError(
+            "Format 3 \"targets\" list is empty , a mod must "
+            "declare at least one target"
         )
 
-    intents: list[Format3Intent] = []
-    for i, raw in enumerate(raw_intents):
-        if not isinstance(raw, dict):
+    pairs: list[tuple[str, list[Format3Intent]]] = []
+    for ti, raw_t in enumerate(raw_targets):
+        if not isinstance(raw_t, dict):
             raise ValueError(
-                f"intent #{i} is not a JSON object"
+                f"targets[{ti}] is not a JSON object"
             )
-        # Required keys per the v3 spec example file. NattKh's newer
-        # skill .field.json variant (e.g. skill_inf_stamina_mod) drops
-        # 'op' since 'set' is implicit. Default to 'set' when absent,
-        # to match the only op CDUMM's apply path supports anyway.
-        # GitHub #66.
-        for required in ("entry", "key", "field"):
-            if required not in raw:
-                raise ValueError(
-                    f"intent #{i} is missing required key '{required}'"
-                )
-        if "new" not in raw:
+        file_value = raw_t.get("file")
+        if not isinstance(file_value, str) or not file_value:
             raise ValueError(
-                f"intent #{i} is missing 'new' (the value to set)"
+                f"targets[{ti}] is missing a \"file\" string"
             )
-        # ``key`` is the record id — silently coercing strings or
-        # truncating floats would silently target a wrong record.
-        # Refuse anything that isn't an int (booleans pass isinstance
-        # check for int in Python, so reject explicitly).
-        raw_key = raw["key"]
-        if isinstance(raw_key, bool) or not isinstance(raw_key, int):
-            raise ValueError(
-                f"intent #{i} has non-integer key {raw_key!r}, "
-                f"key must be an integer record id"
-            )
-        intents.append(Format3Intent(
-            entry=str(raw["entry"]),
-            key=raw_key,
-            field=str(raw["field"]),
-            op=str(raw.get("op", "set")),
-            new=raw["new"],
-        ))
+        intents = _parse_intents_block(
+            raw_t.get("intents"),
+            label=f"targets[{ti}] ({file_value}) intents",
+        )
+        pairs.append((file_value, intents))
+    return pairs
 
-    return target, intents
+
+def parse_format3_mod(path: Path) -> tuple[str, list[Format3Intent]]:
+    """Legacy single-target entry point. Returns ``(target, intents)``.
+
+    Multi-target files (``targets: [{file, intents}, ...]``) raise
+    ``ValueError`` so callers that haven't migrated don't silently
+    drop intents past the first target. Migrate the call site to
+    :func:`parse_format3_mod_targets` and iterate.
+    """
+    pairs = parse_format3_mod_targets(path)
+    if len(pairs) > 1:
+        raise ValueError(
+            f"Multi-target Format 3 file with {len(pairs)} targets "
+            f"hit a single-target caller. Use "
+            f"parse_format3_mod_targets(path) and iterate the "
+            f"returned (target, intents) pairs."
+        )
+    return pairs[0]
 
 
 # ── Validation ──────────────────────────────────────────────────────

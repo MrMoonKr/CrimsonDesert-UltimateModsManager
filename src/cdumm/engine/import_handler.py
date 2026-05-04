@@ -3358,11 +3358,17 @@ def import_from_natt_format_3(
     """
     name = json_path.stem
     title = name
+    data: dict = {}
     try:
         from cdumm.engine.format3_handler import (
-            parse_format3_mod, validate_intents,
+            parse_format3_mod_targets, validate_intents,
         )
-        target, intents = parse_format3_mod(json_path)
+        # Multi-target dialect (NattKh's newer .field.json export,
+        # Faisal 2026-05-04 ZIP review): one mod can declare several
+        # .pabgb targets in a single file. parse_format3_mod_targets
+        # returns one (target, intents) pair per declared target;
+        # singular-shape files yield a 1-pair list.
+        target_pairs = parse_format3_mod_targets(json_path)
         try:
             import json as _json
             with open(json_path, "r", encoding="utf-8") as f:
@@ -3381,54 +3387,119 @@ def import_from_natt_format_3(
         result.error = f"Failed to parse Format 3 mod: {e}"
         return result
 
-    validation = validate_intents(target, intents)
+    # Validate every (target, intents) pair. The mod is importable
+    # if AT LEAST ONE pair has supported intents , the others get
+    # surfaced in the per-target skip summary, same shape the apply
+    # pipeline emits.
+    validations = [
+        (t, intents, validate_intents(t, intents))
+        for t, intents in target_pairs
+    ]
+    total_supported = sum(len(v.supported) for _, _, v in validations)
+    total_skipped = sum(len(v.skipped) for _, _, v in validations)
+    total_intents = sum(len(intents) for _, intents, _ in validations)
+    targets_summary = ", ".join(t for t, _, _ in validations)
+
     result = ModImportResult(title)
 
-    # No supported intents → surface the skip reasons, no DB row.
-    # Creating a row would put the mod in CDUMM's list as 'imported'
-    # but Apply would do nothing — worse UX than not importing.
-    if not validation.supported:
+    # No supported intents across ANY target → surface the skip
+    # reasons, no DB row. Creating a row would put the mod in
+    # CDUMM's list as 'imported' but Apply would do nothing.
+    if total_supported == 0:
+        per_target_summaries = "\n\n".join(
+            f"=== {t} ===\n{v.summary()}"
+            for t, _, v in validations
+        )
         result.error = (
-            f"NattKh Format 3 mod targeting {target}: none of the "
-            f"{len(intents)} intent(s) can be applied yet.\n\n"
-            f"{validation.summary()}\n\n"
+            f"NattKh Format 3 mod targeting {targets_summary}: none "
+            f"of the {total_intents} intent(s) can be applied yet.\n\n"
+            f"{per_target_summaries}\n\n"
             f"Workaround: drop NattKh's offset-based JSON variant "
             f"if they ship one. That format works in CDUMM today."
         )
         return result
 
-    # Some or all intents are applicable → persist the mod so the
-    # apply pipeline can process it. Mirrors import_json_fast
-    # (json_patch_handler.py) but for the Format 3 file shape.
+    # At least one target has supported intents → persist the mod row
+    # using the FIRST target as the primary anchor. Additional targets
+    # get their own mod_deltas rows below so conflict detection sees
+    # every file the mod touches.
+    primary_target = target_pairs[0][0]
     persist_outcome = _persist_format3_mod(
-        json_path=json_path, target=target, mod_name=title,
+        json_path=json_path, target=primary_target, mod_name=title,
         modinfo=(data.get("modinfo") or {}),
         game_dir=game_dir, db=db, existing_mod_id=existing_mod_id,
     )
     if persist_outcome is None:
         # Persistence failed — couldn't resolve target file in PAMTs
         result.error = (
-            f"NattKh Format 3 mod targeting {target}: "
-            f"validated {len(validation.supported)} applicable "
-            f"intent(s), but the target file '{target}' couldn't be "
-            f"located in your game's PAZ archives. Make sure the "
-            f"target name matches a real game data file."
+            f"NattKh Format 3 mod targeting {primary_target}: "
+            f"validated {total_supported} applicable intent(s), but "
+            f"the target file '{primary_target}' couldn't be located "
+            f"in your game's PAZ archives. Make sure the target name "
+            f"matches a real game data file."
         )
         return result
 
-    result.mod_id = persist_outcome["mod_id"]
-    result.changed_files = persist_outcome["changed_files"]
+    mod_id = persist_outcome["mod_id"]
+    changed_files = list(persist_outcome["changed_files"])
 
-    if validation.skipped:
+    # Add mod_deltas rows for the remaining targets (multi-target
+    # mods only). Mirrors _persist_format3_mod's PAMT lookup path.
+    if len(target_pairs) > 1:
+        from cdumm.engine.json_patch_handler import (
+            _derive_pamt_dir, _find_pamt_entry,
+        )
+        vanilla_dir = game_dir / "CDMods" / "vanilla"
+        if not vanilla_dir.exists():
+            vanilla_dir = game_dir
+        for extra_target, _ in target_pairs[1:]:
+            entry = _find_pamt_entry(extra_target, vanilla_dir)
+            if entry is None:
+                entry = _find_pamt_entry(extra_target, game_dir)
+            if entry is None:
+                # Target file genuinely missing from PAMT index.
+                # Skip the mod_deltas row but keep going , the apply
+                # pipeline re-parses json_source and will emit its
+                # own warning per missing target.
+                continue
+            pamt_dir = _derive_pamt_dir(entry.paz_file)
+            if not pamt_dir:
+                continue
+            paz_filename = Path(entry.paz_file).name
+            paz_file_path = f"{pamt_dir}/{paz_filename}"
+            db.connection.execute(
+                "INSERT INTO mod_deltas (mod_id, file_path, "
+                "delta_path, byte_start, byte_end, entry_path) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (mod_id, paz_file_path, "",
+                 entry.offset, entry.offset + entry.comp_size,
+                 extra_target),
+            )
+            changed_files.append({
+                "file_path": paz_file_path,
+                "delta_path": "",
+                "byte_start": entry.offset,
+                "byte_end": entry.offset + entry.comp_size,
+            })
+        db.connection.commit()
+
+    result.mod_id = mod_id
+    result.changed_files = changed_files
+
+    if total_skipped:
+        per_target_summaries = "\n\n".join(
+            f"=== {t} ===\n{v.summary()}"
+            for t, _, v in validations
+        )
         result.info = (
-            f"Format 3 mod imported: {len(validation.supported)} "
-            f"intent(s) ready to apply, {len(validation.skipped)} "
-            f"can't yet:\n\n{validation.summary()}"
+            f"Format 3 mod imported: {total_supported} intent(s) "
+            f"ready to apply, {total_skipped} can't yet:\n\n"
+            f"{per_target_summaries}"
         )
     else:
         result.info = (
-            f"Format 3 mod imported: all {len(intents)} intent(s) "
-            f"on {target} ready to apply."
+            f"Format 3 mod imported: all {total_intents} intent(s) "
+            f"on {targets_summary} ready to apply."
         )
     return result
 

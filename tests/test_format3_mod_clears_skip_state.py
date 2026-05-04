@@ -80,7 +80,7 @@ def test_expand_format3_reports_contributing_mod_ids(tmp_path):
     # to a single fake change keyed by mod_id.
     import cdumm.engine.format3_apply as f3
 
-    original_parse = f3.parse_format3_mod
+    original_parse_targets = f3.parse_format3_mod_targets
     original_validate = f3.validate_intents
     original_intents_to = f3._intents_to_v2_changes
 
@@ -89,11 +89,11 @@ def test_expand_format3_reports_contributing_mod_ids(tmp_path):
             self.supported = supported
             self.skipped = []
 
-    def _stub_parse(p):
-        # Return (target, intents) keyed by which file we're parsing.
+    def _stub_parse_targets(p):
+        # Return list of (target, intents) keyed by which file we're parsing.
         if "mod1" in str(p):
-            return "stamina.pabgb", [{"tid": 1}]
-        return "stamina.pabgb", [{"tid": 2}]
+            return [("stamina.pabgb", [{"tid": 1}])]
+        return [("stamina.pabgb", [{"tid": 2}])]
 
     def _stub_validate(target, intents):
         return _ValRes(intents)
@@ -106,7 +106,7 @@ def test_expand_format3_reports_contributing_mod_ids(tmp_path):
     def _stub_extractor(_target):
         return b"\x00" * 32, b""
 
-    f3.parse_format3_mod = _stub_parse
+    f3.parse_format3_mod_targets = _stub_parse_targets
     f3.validate_intents = _stub_validate
     f3._intents_to_v2_changes = _stub_intents_to
 
@@ -135,7 +135,7 @@ def test_expand_format3_reports_contributing_mod_ids(tmp_path):
             f"mod 202 contributed a change but is missing from "
             f"participating_mod_ids={participating!r}.")
     finally:
-        f3.parse_format3_mod = original_parse
+        f3.parse_format3_mod_targets = original_parse_targets
         f3.validate_intents = original_validate
         f3._intents_to_v2_changes = original_intents_to
 

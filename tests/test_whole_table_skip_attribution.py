@@ -109,7 +109,7 @@ def test_whole_table_writer_tags_merged_change_with_contributor_ids(tmp_path):
     for iteminfo.pabgb / skill.pabgb."""
     from cdumm.engine import format3_apply as f3
 
-    original_parse = f3.parse_format3_mod
+    original_parse_targets = f3.parse_format3_mod_targets
     original_validate = f3.validate_intents
     original_intents_to = f3._intents_to_v2_changes
 
@@ -123,8 +123,8 @@ def test_whole_table_writer_tags_merged_change_with_contributor_ids(tmp_path):
     p1.write_text("{}")
     p2.write_text("{}")
 
-    def _stub_parse(p):
-        return "iteminfo.pabgb", [{"intent": str(p)}]
+    def _stub_parse_targets(p):
+        return [("iteminfo.pabgb", [{"intent": str(p)}])]
 
     def _stub_validate(target, intents):
         return _ValRes(intents)
@@ -136,7 +136,7 @@ def test_whole_table_writer_tags_merged_change_with_contributor_ids(tmp_path):
         return [{"label": "iteminfo merged",
                  "offset": 0, "original": "00", "patched": "01"}]
 
-    f3.parse_format3_mod = _stub_parse
+    f3.parse_format3_mod_targets = _stub_parse_targets
     f3.validate_intents = _stub_validate
     f3._intents_to_v2_changes = _stub_intents_to
 
@@ -171,7 +171,7 @@ def test_whole_table_writer_tags_merged_change_with_contributor_ids(tmp_path):
             vanilla_extractor=lambda t: (b"\x00" * 32, b""),
         )
     finally:
-        f3.parse_format3_mod = original_parse
+        f3.parse_format3_mod_targets = original_parse_targets
         f3.validate_intents = original_validate
         f3._intents_to_v2_changes = original_intents_to
 

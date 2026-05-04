@@ -47,6 +47,7 @@ from cdumm.engine.field_schema import (
 from cdumm.engine.format3_handler import (
     Format3Intent,
     parse_format3_mod,
+    parse_format3_mod_targets,
     validate_intents,
 )
 from cdumm.semantic.parser import (
@@ -128,7 +129,12 @@ def expand_format3_into_aggregated(
             jp = Path(json_source)
             if not jp.exists():
                 continue
-            target, intents = parse_format3_mod(jp)
+            # parse_format3_mod_targets returns one (target, intents)
+            # pair per .pabgb file the mod modifies. Singular-shape
+            # files yield a 1-pair list; multi-target files (NattKh's
+            # newer dialect, e.g. Adfaz Double Resource Buff) yield
+            # one pair per ``targets[i]`` entry.
+            target_pairs = parse_format3_mod_targets(jp)
         except (ValueError, OSError):
             # Either not Format 3 (v2 path already handled it), or
             # the file is malformed. Either way, skip silently —
@@ -136,116 +142,114 @@ def expand_format3_into_aggregated(
             # for the same file.
             continue
 
-        # Confirmed Format 3 mod from here on — count it
+        # Confirmed Format 3 mod from here on — count it once per mod,
+        # not per target.
         n_mods_processed += 1
 
-        # Validate intents against the schema + community field_schema
-        validation = validate_intents(target, intents)
-        if not validation.supported:
-            n_mods_skipped += 1
-            logger.warning(
-                "Format 3 mod '%s' (id=%d): no supported intents "
-                "for %s, %d skipped. Mod produced 0 byte changes.",
-                mod_name, mod_id, target,
-                len(validation.skipped))
-            if warnings_out is not None:
-                warnings_out.append(
-                    f"Format 3 mod '{mod_name}' produced 0 byte "
-                    f"changes targeting '{target}': all "
-                    f"{len(validation.skipped)} intent(s) skipped. "
-                    f"Most likely the field_schema for this table "
-                    f"doesn't yet have entries for the intent fields. "
-                    f"Add a field_schema/<table>.json file with "
-                    f"matching tid or rel_offset entries, or use the "
-                    f"mod's offset-based JSON variant if available."
-                )
-            continue
+        for target, intents in target_pairs:
+            # Validate intents against the schema + community field_schema
+            validation = validate_intents(target, intents)
+            if not validation.supported:
+                n_mods_skipped += 1
+                logger.warning(
+                    "Format 3 mod '%s' (id=%d): no supported intents "
+                    "for %s, %d skipped. Mod produced 0 byte changes.",
+                    mod_name, mod_id, target,
+                    len(validation.skipped))
+                if warnings_out is not None:
+                    warnings_out.append(
+                        f"Format 3 mod '{mod_name}' produced 0 byte "
+                        f"changes targeting '{target}': all "
+                        f"{len(validation.skipped)} intent(s) skipped. "
+                        f"Most likely the field_schema for this table "
+                        f"doesn't yet have entries for the intent fields. "
+                        f"Add a field_schema/<table>.json file with "
+                        f"matching tid or rel_offset entries, or use the "
+                        f"mod's offset-based JSON variant if available."
+                    )
+                continue
 
-        # Extract vanilla bytes for the target file
-        vanilla = vanilla_extractor(target)
-        if vanilla is None:
-            n_mods_skipped += 1
-            logger.warning(
-                "Format 3 mod '%s' (id=%d): vanilla extraction "
-                "failed for %s; skipping.",
-                mod_name, mod_id, target)
-            if warnings_out is not None:
-                warnings_out.append(
-                    f"Format 3 mod '{mod_name}' produced 0 byte "
-                    f"changes: could not extract vanilla bytes for "
-                    f"'{target}'. The target file may not exist in "
-                    f"your game's PAZ archives, check the spelling "
-                    f"or run Steam Verify if the file is missing."
-                )
-            continue
-        vanilla_body, vanilla_header = vanilla
+            # Extract vanilla bytes for the target file
+            vanilla = vanilla_extractor(target)
+            if vanilla is None:
+                n_mods_skipped += 1
+                logger.warning(
+                    "Format 3 mod '%s' (id=%d): vanilla extraction "
+                    "failed for %s; skipping.",
+                    mod_name, mod_id, target)
+                if warnings_out is not None:
+                    warnings_out.append(
+                        f"Format 3 mod '{mod_name}' produced 0 byte "
+                        f"changes: could not extract vanilla bytes for "
+                        f"'{target}'. The target file may not exist in "
+                        f"your game's PAZ archives, check the spelling "
+                        f"or run Steam Verify if the file is missing."
+                    )
+                continue
+            vanilla_body, vanilla_header = vanilla
 
-        # Whole-table writer targets: defer dispatch to the post-loop
-        # phase so all mods' intents land in a single parse+serialize.
-        if target in _WHOLE_TABLE_TARGETS:
-            whole_table_intents.setdefault(target, []).extend(
-                validation.supported)
-            whole_table_mod_names.setdefault(target, []).append(mod_name)
-            whole_table_mod_ids.setdefault(target, []).append(mod_id)
-            n_mods_changed += 1  # provisional; recounted below if no bytes
+            # Whole-table writer targets: defer dispatch to the
+            # post-loop phase so all mods' intents land in a single
+            # parse+serialize.
+            if target in _WHOLE_TABLE_TARGETS:
+                whole_table_intents.setdefault(target, []).extend(
+                    validation.supported)
+                whole_table_mod_names.setdefault(target, []).append(mod_name)
+                whole_table_mod_ids.setdefault(target, []).append(mod_id)
+                n_mods_changed += 1  # provisional; recounted below if no bytes
+                files_touched.add(target)
+                continue
+
+            # Convert each supported intent into a v2-style change dict
+            changes = _intents_to_v2_changes(
+                target, vanilla_body, vanilla_header, validation.supported)
+            if not changes:
+                n_mods_skipped += 1
+                # Don't pollute aggregated with empty lists.
+                logger.debug(
+                    "Format 3 mod '%s' (id=%d): all %d supported intents "
+                    "resolved to zero changes (probably TID-not-found "
+                    "or value out of range).",
+                    mod_name, mod_id, len(validation.supported))
+                if warnings_out is not None:
+                    warnings_out.append(
+                        f"Format 3 mod '{mod_name}' produced 0 byte "
+                        f"changes targeting '{target}': all "
+                        f"{len(validation.supported)} intents resolved "
+                        f"to write-failures. Possible causes: the byte "
+                        f"walker bailed on a variable-length field "
+                        f"(e.g. a tagged-variant entry whose "
+                        f"discriminator value isn't yet decoded — common "
+                        f"for stageinfo's _sequencerDesc), TID not found "
+                        f"in target entries, or value out of range for "
+                        f"the field width. Check the CDUMM log for "
+                        f"per-intent debug lines."
+                    )
+                continue
+
+            # Tag each change with the contributing mod's id so the apply
+            # pipeline's _record_skip can attribute byte-mismatch failures
+            # back to this mod and persist_skip_summary writes a row that
+            # lights up the yellow SKIPPED badge.
+            for c in changes:
+                c["_source_mod_id"] = mod_id
+                c["_target_file"] = target
+            aggregated.setdefault(target, []).extend(changes)
+            # Report this mod as a participant so persist_skip_summary
+            # resets its last_apply_skipped_count on a clean re-apply.
+            if participating_mod_ids is not None:
+                participating_mod_ids.add(mod_id)
+            # Update summary counters for the apply-time log line.
+            n_mods_changed += 1
             files_touched.add(target)
-            continue
-
-        # Convert each supported intent into a v2-style change dict
-        changes = _intents_to_v2_changes(
-            target, vanilla_body, vanilla_header, validation.supported)
-        if not changes:
-            n_mods_skipped += 1
-            # Don't pollute aggregated with empty lists.
+            for c in changes:
+                patched_hex = c.get("patched", "")
+                n_bytes_changed += len(patched_hex) // 2
             logger.debug(
-                "Format 3 mod '%s' (id=%d): all %d supported intents "
-                "resolved to zero changes (probably TID-not-found "
-                "or value out of range).",
-                mod_name, mod_id, len(validation.supported))
-            if warnings_out is not None:
-                warnings_out.append(
-                    f"Format 3 mod '{mod_name}' produced 0 byte "
-                    f"changes targeting '{target}': all "
-                    f"{len(validation.supported)} intents resolved "
-                    f"to write-failures. Possible causes: the byte "
-                    f"walker bailed on a variable-length field "
-                    f"(e.g. a tagged-variant entry whose "
-                    f"discriminator value isn't yet decoded — common "
-                    f"for stageinfo's _sequencerDesc), TID not found "
-                    f"in target entries, or value out of range for "
-                    f"the field width. Check the CDUMM log for "
-                    f"per-intent debug lines."
-                )
-            continue
-
-        # Tag each change with the contributing mod's id so the apply
-        # pipeline's _record_skip can attribute byte-mismatch failures
-        # back to this mod and persist_skip_summary writes a row that
-        # lights up the yellow SKIPPED badge. Without this tag, skips
-        # land anonymous and the badge stays dark for the entire
-        # Format 3 ecosystem. Target file goes alongside so the badge
-        # tooltip's 'file' column names the asset that failed.
-        for c in changes:
-            c["_source_mod_id"] = mod_id
-            c["_target_file"] = target
-        aggregated.setdefault(target, []).extend(changes)
-        # Report this mod as a participant so persist_skip_summary
-        # resets its last_apply_skipped_count on a clean re-apply.
-        # Without this, Format 3 mods that were yellow once stayed
-        # yellow forever , H2 fix.
-        if participating_mod_ids is not None:
-            participating_mod_ids.add(mod_id)
-        # Update summary counters for the apply-time log line.
-        n_mods_changed += 1
-        files_touched.add(target)
-        for c in changes:
-            patched_hex = c.get("patched", "")
-            n_bytes_changed += len(patched_hex) // 2
-        logger.debug(
-            "Format 3 mod '%s' (id=%d): expanded %d intents into "
-            "%d changes on %s",
-            mod_name, mod_id, len(validation.supported),
-            len(changes), target)
+                "Format 3 mod '%s' (id=%d): expanded %d intents into "
+                "%d changes on %s",
+                mod_name, mod_id, len(validation.supported),
+                len(changes), target)
 
     # Whole-table writer dispatch: parse vanilla once, apply ALL
     # collected intents from every contributing mod, serialize once,

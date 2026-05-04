@@ -82,11 +82,12 @@ def test_whole_table_change_carries_target_file(tmp_path, monkeypatch):
     monkeypatch.setattr(fa, "_WHOLE_TABLE_TARGETS",
                         {"iteminfo.pabgb"}, raising=False)
 
-    # We still need parse_format3_mod + validate_intents to return
-    # something. Stub both.
+    # We still need parse_format3_mod_targets + validate_intents to
+    # return something. Stub both. The plural shape is now the
+    # canonical entry the apply path uses.
     fake_intent_obj = type("I", (), {"key": 1})()
-    monkeypatch.setattr(fa, "parse_format3_mod",
-                        lambda p: ("iteminfo.pabgb", [fake_intent_obj]))
+    monkeypatch.setattr(fa, "parse_format3_mod_targets",
+                        lambda p: [("iteminfo.pabgb", [fake_intent_obj])])
 
     class FakeValidation:
         supported = [fake_intent_obj]
