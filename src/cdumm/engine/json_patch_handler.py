@@ -702,41 +702,82 @@ def filter_changes_by_tainted_mods(
             continue
         by_mod.setdefault(int(mid), []).append(c)
 
-    tainted: set[int] = set()
+    # Map each source change dict (by id) to a stable token so the
+    # dry-run's real skip entries can be paired back with their
+    # originating change. id() is stable for the lifetime of this
+    # function call, which is all we need.
+    change_to_token: dict[int, str] = {}
+    for mid, mod_changes in by_mod.items():
+        for i, c in enumerate(mod_changes):
+            change_to_token[id(c)] = f"{mid}:{i}"
+
+    # Per-mod dry-run. Tokenized copies carry _dry_run_token so the
+    # _record_skip helper inside _apply_byte_patches can stamp it on
+    # each real mismatch entry. Originals are NOT mutated.
+    tainted_real_skips: dict[int, list[dict]] = {}
     for mid, mod_changes in by_mod.items():
         scratch = bytearray(vanilla)
         test_skipped: list[dict] = []
+        tokenized = []
+        for c in mod_changes:
+            tc = dict(c)
+            tc["_dry_run_token"] = change_to_token[id(c)]
+            tokenized.append(tc)
         try:
             _apply_byte_patches(
-                scratch, mod_changes, signature=signature,
+                scratch, tokenized, signature=signature,
                 vanilla_data=vanilla, name_offsets=name_offsets,
                 skipped_out=test_skipped)
         except Exception:
-            tainted.add(mid)
+            tainted_real_skips[mid] = []
             continue
         if test_skipped:
-            tainted.add(mid)
+            tainted_real_skips[mid] = test_skipped
 
-    if not tainted:
+    if not tainted_real_skips:
         return list(changes)
+
+    # Index real skip entries by their dry-run token so the second
+    # pass can look up "did this specific change actually mismatch?"
+    # in O(1).
+    real_by_token: dict[str, dict] = {}
+    for entries in tainted_real_skips.values():
+        for e in entries:
+            tok = e.get("_dry_run_token")
+            if tok:
+                real_by_token[tok] = e
 
     clean: list[dict] = []
     for c in changes:
         mid = c.get("_source_mod_id")
-        if mid is not None and int(mid) in tainted:
+        if mid is not None and int(mid) in tainted_real_skips:
             if skipped_out is not None:
-                skipped_out.append({
-                    "label": c.get("label", "")
-                              or c.get("entry", ""),
-                    "expected": c.get("original", ""),
-                    "actual": "",
-                    "offset": -1,
-                    "reason": (
-                        "mod skipped: another patch in this mod "
-                        "did not match"),
-                    "_source_mod_id": int(mid),
-                    "_target_file": c.get("_target_file", ""),
-                })
+                tok = change_to_token.get(id(c))
+                real = real_by_token.get(tok) if tok else None
+                if real is not None:
+                    # Trigger entry: keep the real offset/actual/
+                    # expected/reason from the dry-run. Strip the
+                    # internal token before it escapes.
+                    out = {k: v for k, v in real.items()
+                           if k != "_dry_run_token"}
+                    skipped_out.append(out)
+                else:
+                    # Drag-along: this change matched vanilla but
+                    # gets dropped because a sibling in the same mod
+                    # did not. Synthetic entry keeps the badge count
+                    # honest.
+                    skipped_out.append({
+                        "label": c.get("label", "")
+                                  or c.get("entry", ""),
+                        "expected": c.get("original", ""),
+                        "actual": "",
+                        "offset": -1,
+                        "reason": (
+                            "mod skipped: another patch in this mod "
+                            "did not match"),
+                        "_source_mod_id": int(mid),
+                        "_target_file": c.get("_target_file", ""),
+                    })
         else:
             clean.append(c)
     return clean
@@ -811,6 +852,17 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
         # iteminfo.pabgb) instead of leaving it blank.
         if "_target_file" in change:
             entry["_target_file"] = change["_target_file"]
+        # Internal: propagate the all-or-nothing dry-run token so the
+        # caller can match real mismatch entries back to their source
+        # change. The token gets stripped before the entry escapes
+        # filter_changes_by_tainted_mods. See H1 fix.
+        if "_dry_run_token" in change:
+            entry["_dry_run_token"] = change["_dry_run_token"]
+        # Whole-table Format 3 changes use _source_mod_ids (plural,
+        # list of ints) because one merged change represents many
+        # mods. persist_skip_summary fans out per id. H3 fix.
+        if "_source_mod_ids" in change:
+            entry["_source_mod_ids"] = list(change["_source_mod_ids"])
         skipped_out.append(entry)
     mismatched = 0
     relocated = 0
