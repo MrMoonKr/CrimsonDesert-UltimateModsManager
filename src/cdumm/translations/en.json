@@ -838,6 +838,8 @@
   "mod_card.new": "NEW",
   "mod_card.override": "OVERRIDE",
   "mod_card.skipped": "SKIPPED",
+  "mod_card.skipped_unit_singular": "patch",
+  "mod_card.skipped_unit_plural": "patches",
   "mod_card.select_all": "Select All",
   "drop.title": "Drop",
   "drop.subtitle": "Drop mods here to import",

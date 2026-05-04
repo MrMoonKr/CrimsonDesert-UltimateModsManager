@@ -365,7 +365,13 @@ class ModCard(CardWidget):
         # right-click → Reimport from source without leaving the card.
         if last_apply_skipped_count and last_apply_skipped_count > 0:
             count = int(last_apply_skipped_count)
-            skipped_badge = QLabel(f"⚠ {tr('mod_card.skipped')} ({count})")
+            # Spell out 'patch'/'patches' so the (N) carries meaning.
+            # Pre-fix the label was '⚠ SKIPPED (2)' and Faisal asked
+            # "what is this (2)?" on 2026-05-04 , M3 fix.
+            unit = tr("mod_card.skipped_unit_singular") if count == 1 \
+                else tr("mod_card.skipped_unit_plural")
+            skipped_badge = QLabel(
+                f"⚠ {tr('mod_card.skipped')} ({count} {unit})")
             skipped_badge.setObjectName("skippedBadge")
             skipped_badge.setFixedHeight(26)
             skipped_badge.setMinimumWidth(95)
