@@ -186,3 +186,13 @@ def test_format3_vanilla_extractor_accepts_live_when_hash_matches(
 
     result = extractor("iteminfo.pabgb")
     assert result == (b"live_vanilla_body", b"live_vanilla_header")
+
+    # Lazy backup created so subsequent applies skip the warn path.
+    backup_paz = vanilla_dir / "0008" / "0.paz"
+    backup_pamt = vanilla_dir / "0008" / "0.pamt"
+    assert backup_paz.exists(), (
+        "Format 3 extractor must lazy-backup live PAZ when hash "
+        "matches snapshot")
+    assert backup_pamt.exists(), (
+        "sibling PAMT must also be backed up so subsequent applies "
+        "find the entry directly")
