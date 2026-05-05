@@ -102,9 +102,14 @@ def test_prefix_rejects_implausible_string_length():
         parse_entry_prefix(raw)
 
 
-def test_locate_buff_field_returns_none_for_phase1():
-    """Phase 1 has no body walker yet , every field path returns
-    None so callers can surface a clear 'not yet applied' skip."""
+def test_locate_buff_field_returns_none_for_unresolved_paths():
+    """Paths that need the not-yet-built variant decoder must still
+    return None , this protects callers from accidentally writing
+    to the wrong byte while incremental work proceeds."""
     raw = _build_entry_with_prefix(1, "X", b"\x00" * 100)
-    assert locate_buff_field(raw, "buff_data_list[0].absent_flag") is None
-    assert locate_buff_field(raw, "buff_data_list[0].data.base.flags_a") is None
+    # Nested data.base paths require the BuffDataBase decoder.
+    assert locate_buff_field(
+        raw, "buff_data_list[0].data.base.flags_a") is None
+    # Items at index > 0 require the variant size table.
+    assert locate_buff_field(
+        raw, "buff_data_list[2].absent_flag") is None

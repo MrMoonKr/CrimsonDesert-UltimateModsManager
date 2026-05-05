@@ -152,14 +152,17 @@ def test_locate_buff_field_resolves_wrapper_paths():
     assert res[2] == "u8"
 
 
-def test_locate_buff_field_returns_none_for_nested_paths():
-    """Nested item paths (buff_data_list[i].data.base.X) need the
-    items decoder which isn't here yet , must return None."""
-    raw = _build_synthetic_entry()
+def test_locate_buff_field_returns_none_for_unresolved_paths():
+    """Paths into BuffDataBase substructure or into items beyond
+    index 0 still require decoders not yet built."""
+    raw = _build_synthetic_entry(
+        buff_data_count=1,
+        items_bytes=struct.pack("<I", 0) + bytes([0x01]),
+    )
     assert locate_buff_field(
         raw, "buff_data_list[0].data.base.absent_flag") is None
     assert locate_buff_field(
-        raw, "buff_data_list[0].absent_flag") is None
+        raw, "buff_data_list[1].absent_flag") is None
     assert locate_buff_field(raw, "data.base.flags_a") is None
 
 

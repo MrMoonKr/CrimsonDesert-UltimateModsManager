@@ -61,6 +61,60 @@ _TRAILING_FIXED_BYTES = 15
 # so it's deliberately excluded here.
 _POST_ITEMS_PRE_CSTRING_BYTES = 8
 
+# Per-item header bytes preceding the optional payload:
+# 4 bytes prefix integer + 1 byte absent indicator.
+_ITEM_HEADER_BYTES = 5
+
+
+@dataclass(frozen=True)
+class BuffItemHeader:
+    """Header that precedes each entry in the ``buff_data_list``
+    region. Two fields:
+
+    * ``prefix_id`` , 4-byte unsigned integer (purpose unclear from
+      vanilla data alone, always observed as 1; we read and
+      round-trip it verbatim).
+    * ``absent_flag`` , 1 byte. ``0x00`` means the item is present
+      and a payload of variable length follows. Any non-zero value
+      means the item is absent and no payload is present (the next
+      item's header follows immediately).
+
+    ``payload_offset`` is the byte offset within the entry where the
+    optional payload starts (just past the 5-byte header). It's
+    meaningful only when ``absent_flag == 0``.
+    """
+    prefix_id: int
+    prefix_id_offset: int
+    absent_flag: int
+    absent_flag_offset: int
+    payload_offset: int
+
+
+def parse_item_header(
+    entry_bytes: bytes, position: int,
+) -> BuffItemHeader:
+    """Decode the 5-byte header that introduces each item in the
+    ``buff_data_list`` region.
+
+    ``position`` is the byte offset within ``entry_bytes`` where the
+    item begins. Raises ``ValueError`` if there aren't 5 bytes
+    available at that position.
+    """
+    if position < 0 or position + _ITEM_HEADER_BYTES > len(entry_bytes):
+        raise ValueError(
+            f"buff item header out of range: position {position}, "
+            f"entry size {len(entry_bytes)}"
+        )
+    prefix_id = struct.unpack_from("<I", entry_bytes, position)[0]
+    absent_flag = entry_bytes[position + 4]
+    return BuffItemHeader(
+        prefix_id=prefix_id,
+        prefix_id_offset=position,
+        absent_flag=absent_flag,
+        absent_flag_offset=position + 4,
+        payload_offset=position + _ITEM_HEADER_BYTES,
+    )
+
 
 @dataclass(frozen=True)
 class BuffinfoEntryHeader:
@@ -355,18 +409,49 @@ def locate_buff_field(
     """Resolve a field path to ``(byte_offset, width, dtype)`` within
     an entry, or ``None`` if the path can't be resolved yet.
 
-    Top-level wrapper fields (``min_level``, ``max_level``,
-    ``ui_template_name``, ``elemental_status_info``, etc.) resolve
-    via the decoded BuffinfoEntry. Nested paths into the
-    ``buff_data_list`` items (``buff_data_list[i].data.base.X``)
-    require the items decoder which isn't implemented yet , those
-    return ``None``.
+    Currently supported:
+
+    * Wrapper fields (``min_level``, ``max_level``,
+      ``ui_template_name``, ``elemental_status_info``, etc.) , see
+      ``_WRAPPER_FIELDS`` for the full list.
+    * ``buff_data_list[0].absent_flag`` , the absent indicator on
+      the first item. Items at indices > 0 still return ``None``
+      because walking past a present item's variable-length payload
+      requires the variant size table (not yet built).
+
+    Future expansion will add:
+
+    * ``buff_data_list[N].absent_flag`` for any N (needs variant
+      size table)
+    * ``buff_data_list[N].data.base.{tag, id, name_id, flags_a,
+      flags_b, asset_path, category, ...}`` (needs the payload
+      common-prefix decoder)
     """
-    if "[" in field_path or "." in field_path:
+    # Wrapper-level path: no brackets, no dots.
+    if "[" not in field_path and "." not in field_path:
+        spec = _WRAPPER_FIELDS.get(field_path)
+        if spec is None:
+            return None
+        offset_attr, width, dtype = spec
+        entry = parse_entry(entry_bytes)
+        return getattr(entry, offset_attr), width, dtype
+
+    # Item-level paths of the shape ``buff_data_list[N].leaf``.
+    # Only N=0 + leaf=absent_flag is decodable today.
+    if field_path.startswith("buff_data_list["):
+        try:
+            close_bracket = field_path.index("]")
+            n = int(field_path[len("buff_data_list["):close_bracket])
+            tail = field_path[close_bracket + 1:]
+        except (ValueError, IndexError):
+            return None
+        if n != 0:
+            return None
+        if tail == ".absent_flag":
+            entry = parse_entry(entry_bytes)
+            header = parse_item_header(
+                entry_bytes, entry.buff_data_list_offset)
+            return header.absent_flag_offset, 1, "u8"
         return None
-    spec = _WRAPPER_FIELDS.get(field_path)
-    if spec is None:
-        return None
-    offset_attr, width, dtype = spec
-    entry = parse_entry(entry_bytes)
-    return getattr(entry, offset_attr), width, dtype
+
+    return None
