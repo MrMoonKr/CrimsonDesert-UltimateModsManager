@@ -339,6 +339,17 @@ def _intents_to_v2_changes(
     table_name = identify_table_from_path(target) or _strip_pabgb(target)
     from cdumm.engine.format3_handler import LIST_WRITERS
 
+    # buffinfo.pabgb has a CDUMM PABGB schema entry but its declared
+    # field stream sizes are wrong (e.g. _isBlocked declared as
+    # direct_15B when it's actually a u8, _buffDataList declared as
+    # direct_u32 when it's actually a length-prefixed variant array).
+    # The generic schema walker silently lands at the wrong offset.
+    # Route buffinfo through the clean-room buffinfo parser instead,
+    # which knows the actual on-disk layout.
+    if table_name == "buffinfo":
+        return _buffinfo_intents_to_changes(
+            vanilla_body, vanilla_header, intents)
+
     has_cdumm_schema = has_schema(table_name)
     # Tables without a CDUMM PABGB schema are still processable when
     # ALL their intents target a registered list writer (e.g. skill.pabgb
@@ -535,6 +546,107 @@ def _intents_to_v2_changes(
         if skill_change is not None:
             out.append(skill_change)
 
+    return out
+
+
+_BUFFINFO_DTYPE_PACK = {
+    "u8": ("B", 1),
+    "u16": ("H", 2),
+    "u32": ("I", 4),
+    "u64": ("Q", 8),
+}
+
+
+def _buffinfo_intents_to_changes(
+    vanilla_body: bytes, vanilla_header: bytes,
+    intents: list[Format3Intent],
+) -> list[dict]:
+    """Resolve buffinfo intents through the clean-room buffinfo parser.
+
+    The generic schema walker can't walk past variable-length items, so
+    the CDUMM PABGB schema for buffinfo is structurally wrong. This
+    helper reads the PABGH key→offset table, slices each entry's bytes,
+    delegates field resolution to ``buffinfo_parser.locate_buff_field``,
+    and packs the new value with the dtype the parser reports.
+
+    Intents whose key isn't in PABGH, whose field path isn't yet
+    resolvable (e.g. items past an unknown variant), or whose new
+    value doesn't fit the declared width, are silently dropped , the
+    same shape the v2 aggregator uses. The expand_format3 caller
+    surfaces "0 byte changes" warnings for whole-mod dropouts.
+    """
+    from cdumm._vendor.buffinfo_parser import locate_buff_field
+
+    key_size, offsets = parse_pabgh_index(vanilla_header, "buffinfo")
+    if not offsets:
+        return []
+    # buffinfo PABGH is u32-keyed in every shipped game version we've
+    # observed. Refuse other widths rather than misalign.
+    if key_size != 4:
+        logger.warning(
+            "Format 3 buffinfo expansion refused: PABGH key_size=%d "
+            "(expected 4). Skipping all %d intent(s).",
+            key_size, len(intents))
+        return []
+
+    sorted_offs = sorted(offsets.items(), key=lambda kv: kv[1])
+    entry_bounds: dict[int, tuple[int, int]] = {}
+    for i, (k, off) in enumerate(sorted_offs):
+        end = (sorted_offs[i + 1][1]
+               if i + 1 < len(sorted_offs) else len(vanilla_body))
+        entry_bounds[k] = (off, end)
+
+    out: list[dict] = []
+    for intent in intents:
+        bounds = entry_bounds.get(intent.key)
+        if bounds is None:
+            continue
+        entry_off, entry_end = bounds
+        entry_bytes = bytes(vanilla_body[entry_off:entry_end])
+        try:
+            located = locate_buff_field(entry_bytes, intent.field)
+        except (ValueError, struct.error):
+            continue
+        if located is None:
+            continue
+        rel_in_entry, width, dtype = located
+        spec = _BUFFINFO_DTYPE_PACK.get(dtype)
+        if spec is None:
+            # cstring or other variable-length leaf , not a primitive
+            # write target; needs the per-tag decoder.
+            continue
+        fmt, expected_width = spec
+        if width != expected_width:
+            continue
+        try:
+            new_bytes = struct.pack(f"<{fmt}", intent.new)
+        except (struct.error, TypeError):
+            continue
+        abs_off = entry_off + rel_in_entry
+        if abs_off + width > entry_end:
+            continue
+        original_bytes = bytes(vanilla_body[abs_off:abs_off + width])
+
+        # Compute rel_offset against the same anchor the apply pipeline
+        # uses for buffinfo (name_end), matching the convention in the
+        # generic schema-based path.
+        eid_size = 4
+        name_len = struct.unpack_from(
+            "<I", vanilla_body, entry_off + eid_size)[0]
+        name_end = entry_off + eid_size + 4 + name_len
+        try:
+            entry_name = vanilla_body[
+                entry_off + eid_size + 4:name_end].decode("utf-8")
+        except UnicodeDecodeError:
+            entry_name = intent.entry
+
+        out.append({
+            "entry": entry_name or intent.entry,
+            "rel_offset": abs_off - name_end,
+            "original": original_bytes.hex(),
+            "patched": new_bytes.hex(),
+            "label": f"{intent.entry}.{intent.field}",
+        })
     return out
 
 
