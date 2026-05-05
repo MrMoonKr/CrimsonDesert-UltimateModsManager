@@ -909,7 +909,12 @@ def serialize_entry(entry: BuffinfoEntry) -> bytes:
 # intent expander to format the patched bytes correctly.
 _WRAPPER_FIELDS: dict[str, tuple[str, int, str]] = {
     "is_blocked": ("is_blocked_offset", 1, "u8"),
-    "buff_data_count": ("buff_data_count_offset", 4, "u32"),
+    # buff_data_count intentionally omitted: it's the structural
+    # length prefix for the items array. Writing it without a
+    # matching change to the item list would leave parse_entry
+    # reading N items from a buffer with M actual items, walking
+    # past entry end. Item-list edits are not yet supported in
+    # Format 3 apply; until they are, this field stays read-only.
     "min_level": ("min_level_offset", 4, "u32"),
     "max_level": ("max_level_offset", 4, "u32"),
     "buff_level_calculate_type":
