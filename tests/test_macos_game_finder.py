@@ -158,6 +158,45 @@ class TestFindMacosGameDirectories:
 
         assert game_finder._find_macos_game_directories() == []
 
+    def test_finds_app_nested_one_level_in_steam_library(
+            self, tmp_path, monkeypatch):
+        """Steam macOS wraps each game in a folder: the .app sits one
+        level deeper than ``steamapps/common/``. Verify the
+        ``Crimson Desert/CrimsonDesert_Steam.app`` layout (CptUndies's
+        real path on Nexus #2253) auto-detects."""
+        steam_root = tmp_path / "Steam"
+        common = steam_root / "steamapps" / "common"
+        wrapper = common / "Crimson Desert"
+        wrapper.mkdir(parents=True)
+        _make_app_bundle(wrapper, app_name="CrimsonDesert_Steam.app")
+
+        monkeypatch.setattr(
+            game_finder, "MACOS_GAME_LOCATIONS", [])
+        monkeypatch.setattr(
+            game_finder, "STEAM_DEFAULT_PATHS_MACOS", [steam_root])
+
+        results = game_finder._find_macos_game_directories()
+        assert len(results) == 1
+        assert "CrimsonDesert_Steam.app" in str(results[0])
+        assert results[0].name == "packages"
+
+    def test_finds_app_in_grandchild_for_games_location(
+            self, tmp_path, monkeypatch):
+        """Defensive: users who put the .app inside a wrapper folder
+        under ~/Games also auto-detect."""
+        games = tmp_path / "Games"
+        wrapper = games / "Crimson Desert Game Files"
+        wrapper.mkdir(parents=True)
+        _make_app_bundle(wrapper)
+
+        monkeypatch.setattr(
+            game_finder, "MACOS_GAME_LOCATIONS", [games])
+        monkeypatch.setattr(
+            game_finder, "STEAM_DEFAULT_PATHS_MACOS", [])
+
+        results = game_finder._find_macos_game_directories()
+        assert len(results) == 1
+
 
 # ── validate_game_directory on macOS ─────────────────────────────────
 

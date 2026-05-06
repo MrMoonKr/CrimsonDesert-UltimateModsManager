@@ -183,6 +183,37 @@ already on disk), but reimport-from-source and "open source folder"
 won't work for those rows. Re-drop the original archive on top of
 the existing card to relink.
 
+## Common issues
+
+**App appears to launch but no GUI shows.**
+macOS blocks Finder-launched apps from writing into other `.app`
+bundles unless you grant App Management permission. CDUMM needs this
+to write mod overlays into `Crimson Desert.app`. Open
+**System Settings → Privacy & Security → App Management** and toggle
+CDUMM on. If CDUMM doesn't appear in the list, click **+** and add it
+manually. (See goodygoosey / Harlo75 reports on Nexus #2253.)
+
+**App is stuck in a broken state — won't launch even after granting permission.**
+If a previous CDUMM run crashed mid-startup it can leave a stale
+state directory behind. Quit CDUMM if it's running, then:
+
+```bash
+rm -rf "$HOME/Library/Application Support/cdumm"
+```
+
+Re-launch CDUMM and run through the welcome wizard again. Your mods
+themselves live in `Crimson Desert.app/Contents/Resources/packages/CDMods/`
+and aren't affected. (CptUndies workaround on Nexus #2253.)
+
+**Gatekeeper warning: "Apple cannot check it for malicious software."**
+The .dmg is ad-hoc signed (no Apple Developer ID — it's a free
+project). On the first run, right-click `CDUMM.app` → Open → Open.
+Or run once:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/CDUMM.app
+```
+
 ## What's next
 
 - **Notarisation**: would suppress the first-launch Gatekeeper prompt

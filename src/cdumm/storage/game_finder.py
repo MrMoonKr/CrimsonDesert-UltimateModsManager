@@ -279,31 +279,45 @@ def _resolve_macos_game_dir(candidate: Path) -> Path | None:
     return None
 
 
-def _scan_macos_app_in_dir(parent: Path) -> list[Path]:
+def _scan_macos_app_in_dir(parent: Path, depth: int = 2) -> list[Path]:
     """Look for ``Crimson Desert.app`` (or any .app whose inner
-    packages dir is the game root) directly inside ``parent``.
+    packages dir matches the game root) inside ``parent``, up to
+    ``depth`` directory levels.
 
-    One level only; we don't deep-recurse user home directories.
-    Returns a list of resolved game data paths (the inner packages
-    directory, not the .app itself) so callers can treat them like
-    Steam library hits.
+    ``depth=1`` — direct children only. Adequate for ``~/Games``,
+    ``~/Applications``, ``/Applications``: users normally drop the
+    .app at the top level there.
+
+    ``depth=2`` (default) — also descend one level into non-.app
+    children. Required for ``<steam>/steamapps/common/`` where Steam
+    wraps each game in a ``<game-folder>/<game.app>`` layout. Verified
+    via the CptUndies PermissionError trace on Nexus #2253 (2026-05-05):
+    the real path is ``Crimson Desert/CrimsonDesert_Steam.app``, not
+    the bare ``Crimson Desert.app`` that the previous implementation
+    expected. Cost is one extra ``iterdir`` per non-.app subdirectory
+    — negligible at the scale of a Steam library.
+
+    Returns the inner ``Contents/Resources/packages`` path for each
+    hit (not the .app itself) so callers can treat it like a Steam
+    library result.
     """
     found: list[Path] = []
     if not parent.exists() or not parent.is_dir():
         return found
     try:
         for entry in parent.iterdir():
-            if entry.suffix != ".app":
-                continue
-            # Quick name filter — saves a stat on every other .app the
-            # user has installed in /Applications.
-            name_lower = entry.name.lower()
-            if "crimson" not in name_lower:
-                continue
-            inner = entry / MACOS_APP_DATA_SUBPATH
-            if _looks_like_game_root(inner):
-                found.append(inner)
-                logger.info("Found Crimson Desert (macOS .app) at %s", entry)
+            if entry.suffix == ".app":
+                # Quick name filter — saves a stat on every other .app
+                # the user has installed in /Applications.
+                if "crimson" not in entry.name.lower():
+                    continue
+                inner = entry / MACOS_APP_DATA_SUBPATH
+                if _looks_like_game_root(inner):
+                    found.append(inner)
+                    logger.info(
+                        "Found Crimson Desert (macOS .app) at %s", entry)
+            elif depth > 1 and entry.is_dir():
+                found.extend(_scan_macos_app_in_dir(entry, depth=depth - 1))
     except OSError:
         pass
     return found
@@ -313,10 +327,18 @@ def _find_macos_steam_libraries() -> list[Path]:
     """Search macOS Steam libraries for Crimson Desert.
 
     Steam on macOS uses the same ``steamapps/libraryfolders.vdf``
-    layout as Linux/Windows; the only difference is the default root
-    location and the fact that Mac-native games install as
-    ``<Game>.app`` instead of a folder. The library hit is the
-    inner ``Contents/Resources/packages/`` directory.
+    layout as Linux/Windows; the differences are the default root
+    location (``~/Library/Application Support/Steam``) and the
+    install layout: each game lives inside its own wrapper folder
+    that contains the ``.app`` bundle, e.g.
+
+        steamapps/common/Crimson Desert/CrimsonDesert_Steam.app/
+
+    not the bare ``<Game>.app`` directly under ``common/`` that the
+    Linux/Windows scan looks for. ``_scan_macos_app_in_dir`` defaults
+    to ``depth=2`` to descend one level into non-.app children of
+    ``common/`` and find the .app inside its wrapper. The library hit
+    is the inner ``Contents/Resources/packages/`` directory.
     """
     candidates: list[Path] = []
     for root in STEAM_DEFAULT_PATHS_MACOS:
