@@ -664,10 +664,16 @@ def _read_PrefabDataTribe(r: _Reader, elem_index: int = 0, total_count: int = 1)
         return _read_PrefabDataTribe_shapeA(r)
     if r.data[r.pos:r.pos + 4] == b"\x00\x00\x00\x00":
         return _read_PrefabDataTribe_shapeA(r)
-    # Shape A2 candidate: first u32 != 0 AND bytes 4..12 = 00 00 00 00
-    # 01 00 00 00 (unk_b == 0, chain_outer_cnt == 1). Otherwise legacy
+    # Shape A2 candidate: first u32 != 0 AND bytes 4..8 = 00 00 00 00
+    # (unk_b == 0). chain_outer_cnt at bytes 8..12 may be any small value
+    # in {1, 2, 3, 4, 5} per SHAPE_A2_findings_v3.md (Families B/D/F/G with
+    # cnt_outer != 1). Try Shape A2 first; if it raises, fall back to
     # Shape B (cat 3601 17-byte layout).
-    if r.data[r.pos + 4:r.pos + 12] == b"\x00\x00\x00\x00\x01\x00\x00\x00":
+    if (
+        r.data[r.pos + 4:r.pos + 8] == b"\x00\x00\x00\x00"
+        and r.data[r.pos + 9:r.pos + 12] == b"\x00\x00\x00"
+        and 1 <= r.data[r.pos + 8] <= 15
+    ):
         snap = r.pos
         try:
             return _read_PrefabDataTribe_shapeA2(r)
