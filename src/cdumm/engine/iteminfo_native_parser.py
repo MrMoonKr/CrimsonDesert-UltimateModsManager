@@ -212,18 +212,27 @@ def _write_OccupiedEquipSlotData(w: _Writer, v: dict) -> None:
 
 
 def _read_ItemIconData(r: _Reader) -> dict:
-    """Live (post-1.0.4.1) layout — to be confirmed during RE pass."""
+    """Post-1.0.4.1 layout, RE'd from live binary.
+
+    Old layout (pre-1.0.4.1) was: u32 icon_path + u8 check_exist_sealed_data
+    + carray<u32> gimmick_state_list. The post-patch layout is fixed-size
+    14 bytes, with no inner list. The exact role of the new u32 fields is
+    unknown but they appear to be name hashes (Jenkins hashlittle values
+    matching tag/state names).
+    """
     return {
         "icon_path": r.u32(),
-        "check_exist_sealed_data": r.u8(),
-        "gimmick_state_list": r.carray(_Reader.u32),
+        "unk_a": r.u32(),
+        "unk_b": r.u32(),
+        "unk_c": r.u16(),
     }
 
 
 def _write_ItemIconData(w: _Writer, v: dict) -> None:
     w.u32(v["icon_path"])
-    w.u8(v["check_exist_sealed_data"])
-    w.carray(v["gimmick_state_list"], _Writer.u32)
+    w.u32(v["unk_a"])
+    w.u32(v["unk_b"])
+    w.u16(v["unk_c"])
 
 
 def _read_PassiveSkillLevel(r: _Reader) -> dict:
@@ -371,15 +380,19 @@ def _write_GameEventExecuteData(w: _Writer, v: dict) -> None:
 
 
 def _read_InventoryChangeData(r: _Reader) -> dict:
+    """Post-1.0.4.1 layout: original 13 + 2 = 15 bytes plus a NEW
+    trailing u32. Total 19 bytes (with optional flag = 20)."""
     return {
         "game_event_execute_data": _read_GameEventExecuteData(r),
         "to_inventory_info": r.u16(),
+        "unk_post_inventory_change": r.u32(),
     }
 
 
 def _write_InventoryChangeData(w: _Writer, v: dict) -> None:
     _write_GameEventExecuteData(w, v["game_event_execute_data"])
     w.u16(v["to_inventory_info"])
+    w.u32(v["unk_post_inventory_change"])
 
 
 def _read_PageData(r: _Reader) -> dict:
@@ -525,7 +538,14 @@ def _write_MoneyTypeDefine(w: _Writer, v: dict) -> None:
 
 
 def _read_PrefabData(r: _Reader) -> dict:
+    """Post-1.0.4.1 layout. New u32 hash prefix, then 3 u32 carrays then u8.
+
+    The hash appears to be a tag-name Jenkins hashlittle. Field roles
+    (which carray is equip_slot_list etc) are inferred from .pyi stubs;
+    they line up by size with old layout (only the leading hash is new).
+    """
     return {
+        "tag_name_hash": r.u32(),
         "prefab_names": r.carray(_Reader.u32),
         "equip_slot_list": r.carray(_Reader.u16),
         "tribe_gender_list": r.carray(_Reader.u32),
@@ -534,6 +554,7 @@ def _read_PrefabData(r: _Reader) -> dict:
 
 
 def _write_PrefabData(w: _Writer, v: dict) -> None:
+    w.u32(v["tag_name_hash"])
     w.carray(v["prefab_names"], _Writer.u32)
     w.carray(v["equip_slot_list"], _Writer.u16)
     w.carray(v["tribe_gender_list"], _Writer.u32)
@@ -724,6 +745,9 @@ _ITEM_FIELDS = [
     ("use_immediately", "u8"),
     ("apply_max_stack_cap", "u8"),
     ("extract_multi_change_info", "u32"),
+    # Post-1.0.4.1 additions, observed in live binary:
+    ("extract_additional_drop_set_info", "u32"),
+    ("minimum_extract_enchant_level", "u16"),
     ("item_memo", "cstring"),
     ("filter_type", "cstring"),
     ("gimmick_info", "u32"),
@@ -755,6 +779,8 @@ _ITEM_FIELDS = [
     ("is_dyeable", "u8"),
     ("is_editable_grime", "u8"),
     ("is_destroy_when_broken", "u8"),
+    # Post-1.0.4.1 addition observed in live binary.
+    ("is_housing_only", "u8"),
     ("quick_slot_index", "u8"),
     ("reserve_slot_target_data_list", "carray", _read_ReserveSlotTargetData,
      _write_ReserveSlotTargetData),
@@ -764,7 +790,9 @@ _ITEM_FIELDS = [
     ("drop_default_data", "struct", _read_DropDefaultData,
      _write_DropDefaultData),
     ("prefab_data_list", "carray", _read_PrefabData, _write_PrefabData),
-    ("enchant_data_list", "carray", _read_EnchantData, _write_EnchantData),
+    # Post-1.0.4.1: enchant_data_list appears to have been REMOVED from
+    # the per-item record. (None of the live binary records expose a
+    # parseable count here; gvp comes immediately after prefab_data_list.)
     ("gimmick_visual_prefab_data_list", "carray",
      _read_GimmickVisualPrefabData, _write_GimmickVisualPrefabData),
     ("price_list", "carray", _read_ItemPriceInfo, _write_ItemPriceInfo),
@@ -778,10 +806,25 @@ _ITEM_FIELDS = [
     ("inspect_action", "struct", _read_InspectAction, _write_InspectAction),
     ("default_sub_item", "struct", _read_SubItem, _write_SubItem),
     ("cooltime", "i64"),
+    # Post-1.0.4.1 additions, observed as 8-byte zero fields between
+    # cooltime and item_charge_type. Type assumed i64 by best-fit.
+    # NOTE: For records with item_charge_type==0 (category 4001 quest
+    # papers and similar), unk_post_cooltime_b appears to be 4 bytes
+    # shorter than for type==2 records — the exact RE detail of which
+    # field shrinks is unresolved. Records of type==0 currently fail
+    # to round-trip; type==2 records (records 0..55 in the live fixture)
+    # parse correctly with the layout below.
+    ("unk_post_cooltime_a", "i64"),
+    ("unk_post_cooltime_b", "i64"),
     ("item_charge_type", "u8"),
     ("sharpness_data", "struct", _read_ItemInfoSharpnessData,
      _write_ItemInfoSharpnessData),
+    # Single-byte trailing field after sharpness_data, observed zero in
+    # all sampled records. Possibly a new sharpness flag or padding.
+    ("unk_post_sharpness", "u8"),
     ("max_charged_useable_count", "u32"),
+    ("unk_post_max_charged_a", "u32"),
+    ("unk_post_max_charged_b", "u32"),
     ("hackable_character_group_info_list", "carray_u16"),
     ("item_group_info_list", "carray_u16"),
     ("discard_offset_y", "f32"),
@@ -792,9 +835,17 @@ _ITEM_FIELDS = [
     ("packed_item_info", "u32"),
     ("unpacked_item_info", "u32"),
     ("convert_item_info_by_drop_npc", "u32"),
+    # Post-1.0.4.1: NEW carray of pattern descriptions. In all sampled
+    # records this is empty (count u32 = 0); the inner element shape is
+    # unknown so we treat as opaque carray of u32 (will misparse if a
+    # non-empty record is seen — must be revisited then).
+    ("pattern_description_data_list", "carray_u32"),
     ("look_detail_game_advice_info_wrapper", "u32"),
     ("look_detail_mission_info", "u32"),
     ("enable_alert_system_to_ui", "u8"),
+    # Post-1.0.4.1: NEW u32 usable_alert_type sits BEFORE the existing
+    # u8 usable_alert (rather than replacing it).
+    ("usable_alert_type", "u32"),
     ("usable_alert", "u8"),
     ("is_save_game_data_at_use_item", "u8"),
     ("is_logout_at_use_item", "u8"),
@@ -807,6 +858,9 @@ _ITEM_FIELDS = [
     ("enable_equip_in_clone_actor", "u8"),
     ("is_blocked_store_sell", "u8"),
     ("is_preorder_item", "u8"),
+    # Post-1.0.4.1 additions between is_preorder_item and respawn_time_seconds.
+    ("is_has_item_use_data_inventory_buff", "u8"),
+    ("is_preserved_on_extract", "u8"),
     ("respawn_time_seconds", "i64"),
     ("max_endurance", "u16"),
     ("repair_data_list", "carray", _read_RepairData, _write_RepairData),
