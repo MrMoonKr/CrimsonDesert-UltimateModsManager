@@ -615,6 +615,16 @@ def _read_PrefabDataTribe(r: _Reader, elem_index: int = 0, total_count: int = 1)
         return _read_PrefabDataTribe_shapeA(r)
     if r.data[r.pos:r.pos + 4] == b"\x00\x00\x00\x00":
         return _read_PrefabDataTribe_shapeA(r)
+    # Shape A2 candidate: first u32 != 0 AND bytes 4..12 = 00 00 00 00
+    # 01 00 00 00 (unk_b == 0, chain_outer_cnt == 1). Otherwise legacy
+    # Shape B (cat 3601 17-byte layout).
+    if r.data[r.pos + 4:r.pos + 12] == b"\x00\x00\x00\x00\x01\x00\x00\x00":
+        snap = r.pos
+        try:
+            return _read_PrefabDataTribe_shapeA2(r)
+        except Exception:
+            r.pos = snap
+            # Fall through to Shape B
     return _read_PrefabDataTribe_shapeB(r)
 
 
@@ -744,14 +754,133 @@ def _read_PrefabDataTribe_shapeB(r: _Reader) -> dict:
     }
 
 
+def _read_PrefabDataTribe_shapeA2(r: _Reader) -> dict:
+    """Shape A2 (per SHAPE_A2_findings_v2.md): tribe-variant override.
+
+    Layout:
+      u32 hash_a (!= 0)
+      u32 unk_b (= 0)
+      u32 chain_outer_cnt (= 1)
+      <chain alternating EVEN(12) / ODD(9) entries> ending at a 10-byte
+        zero terminator
+      TribeFooter {
+        u32 cnt_outer
+        for each cnt_outer: FooterOuter {
+          u32 hash, u32 value, u64 unk, u32 cnt_inner,
+          cnt_inner * FooterInner(20 bytes: u32 a, u32 b, u64 unk, u32 c)
+        }
+        u32 trailing
+      }
+    """
+    hash_a = r.u32()
+    unk_b = r.u32()
+    chain_outer_cnt = r.u32()
+    chain: list[dict] = []
+    depth = 0
+    # Walk chain entries until 10-byte zero terminator. Terminator
+    # alignment: the terminator's first 10 bytes are zero. Probe by
+    # checking 10 bytes of zero at current position.
+    while True:
+        if r.pos + 10 > len(r.data):
+            raise IndexError("ShapeA2 chain ran past buffer")
+        if r.data[r.pos:r.pos + 10] == b"\x00" * 10:
+            r.pos += 10
+            break
+        # Empirically depth 0 is ODD(9), depth 1 EVEN(12), alternating.
+        # Verified on rec5031 (chain depth 1, all ODD), rec1977/rec1978
+        # (depth 7+, alternating starting ODD).
+        if depth % 2 == 0:
+            # ODD: 9 bytes  u32 hash + u8 zero + u32 cnt
+            entry = {
+                "depth": depth,
+                "kind": "odd",
+                "hash": r.u32(),
+                "zero8": r.u8(),
+                "cnt": r.u32(),
+            }
+        else:
+            # EVEN: 12 bytes  u32 hash + u32 zero + u32 cnt
+            entry = {
+                "depth": depth,
+                "kind": "even",
+                "hash": r.u32(),
+                "zero32": r.u32(),
+                "cnt": r.u32(),
+            }
+        chain.append(entry)
+        depth += 1
+
+    cnt_outer = r.u32()
+    footer_outers: list[dict] = []
+    for _ in range(cnt_outer):
+        outer = {
+            "hash": r.u32(),
+            "value": r.u32(),
+            "unk": r.u64(),
+            "inner": [],
+        }
+        cnt_inner = r.u32()
+        for _ in range(cnt_inner):
+            outer["inner"].append({
+                "a": r.u32(),
+                "b": r.u32(),
+                "unk": r.u64(),
+                "c": r.u32(),
+            })
+        footer_outers.append(outer)
+    trailing = r.u32()
+
+    return {
+        "shape": "A2",
+        "hash_a": hash_a,
+        "unk_b": unk_b,
+        "chain_outer_cnt": chain_outer_cnt,
+        "chain": chain,
+        "footer_outers": footer_outers,
+        "trailing": trailing,
+    }
+
+
+def _write_PrefabDataTribe_shapeA2(w: _Writer, v: dict) -> None:
+    w.u32(v["hash_a"])
+    w.u32(v["unk_b"])
+    w.u32(v["chain_outer_cnt"])
+    for entry in v["chain"]:
+        if entry["kind"] == "even":
+            w.u32(entry["hash"])
+            w.u32(entry["zero32"])
+            w.u32(entry["cnt"])
+        else:
+            w.u32(entry["hash"])
+            w.u8(entry["zero8"])
+            w.u32(entry["cnt"])
+    w.u8(0); w.u8(0); w.u8(0); w.u8(0); w.u8(0)
+    w.u8(0); w.u8(0); w.u8(0); w.u8(0); w.u8(0)
+    w.u32(len(v["footer_outers"]))
+    for outer in v["footer_outers"]:
+        w.u32(outer["hash"])
+        w.u32(outer["value"])
+        w.u64(outer["unk"])
+        w.u32(len(outer["inner"]))
+        for inner in outer["inner"]:
+            w.u32(inner["a"])
+            w.u32(inner["b"])
+            w.u64(inner["unk"])
+            w.u32(inner["c"])
+    w.u32(v["trailing"])
+
+
 def _write_PrefabDataTribe(w: _Writer, v: dict) -> None:
-    if v.get("shape") == "A":
+    shape = v.get("shape")
+    if shape == "A":
         w.u32(v["hash_a"])
         w.u32(v["unk_b"])
         w.u16(v["unk_c"])
         w.carray(v["list_a"], _write_TribeRef)
         w.carray(v["list_b"], _write_TribeRef)
         w.carray(v["list_c"], _write_TribeStat)
+    elif shape == "A2":
+        _write_PrefabDataTribe_shapeA2(w, v)
     else:
         w.u32(v["unk_a"])
         w.u64(v["unk_b"])
