@@ -355,6 +355,14 @@ class ConfigPanel(QWidget):
         self._anim = QPropertyAnimation(self, b"maximumWidth")
         self._anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
         self._anim.setDuration(self._ANIM_DURATION)
+        # Tracks whether _emit_closed is currently connected to
+        # _anim.finished. close_panel() sets True; show_*() sets False
+        # after disconnect. Without this flag, every show_*() unconditionally
+        # called disconnect() on a fresh panel and PySide6 emitted
+        # RuntimeWarning("Failed to disconnect ... from signal 'finished()'")
+        # — the try/except RuntimeError caught the exception but the warning
+        # is emitted before the raise.
+        self._closed_handler_connected = False
 
         self._build_ui()
         self._apply_theme()
@@ -591,10 +599,7 @@ class ConfigPanel(QWidget):
         # Animate open (width + opacity)
         self.setVisible(True)
         self._anim.stop()
-        try:
-            self._anim.finished.disconnect(self._emit_closed)
-        except RuntimeError:
-            pass  # not connected
+        self._disconnect_closed_handler()
         self._anim.setStartValue(self.maximumWidth())
         self._anim.setEndValue(self._PANEL_WIDTH)
 
@@ -620,6 +625,7 @@ class ConfigPanel(QWidget):
         self._anim.setStartValue(self.maximumWidth())
         self._anim.setEndValue(0)
         self._anim.finished.connect(self._emit_closed, Qt.ConnectionType.UniqueConnection)
+        self._closed_handler_connected = True
         self._anim.start()
 
     # ------------------------------------------------------------------
@@ -630,6 +636,19 @@ class ConfigPanel(QWidget):
         if self.maximumWidth() == 0:
             self.setVisible(False)
             self.panel_closed.emit()
+
+    def _disconnect_closed_handler(self) -> None:
+        """Disconnect _emit_closed from _anim.finished if currently
+        connected. No-op (no warning) when not connected. Used by every
+        show_*() method before re-arming the open animation."""
+        if self._closed_handler_connected:
+            try:
+                self._anim.finished.disconnect(self._emit_closed)
+            except RuntimeError:
+                # Signal was destroyed between our flag and the call;
+                # treat as already-disconnected.
+                pass
+            self._closed_handler_connected = False
 
     # ------------------------------------------------------------------
     # User-resizable width (Task 2.1)
@@ -1227,10 +1246,7 @@ class ConfigPanel(QWidget):
 
             self.setVisible(True)
             self._anim.stop()
-            try:
-                self._anim.finished.disconnect(self._emit_closed)
-            except RuntimeError:
-                pass
+            self._disconnect_closed_handler()
             self._anim.setStartValue(self.maximumWidth())
             self._anim.setEndValue(self._PANEL_WIDTH)
             self._opacity_effect = QGraphicsOpacityEffect(self)
@@ -1289,10 +1305,7 @@ class ConfigPanel(QWidget):
 
         self.setVisible(True)
         self._anim.stop()
-        try:
-            self._anim.finished.disconnect(self._emit_closed)
-        except RuntimeError:
-            pass
+        self._disconnect_closed_handler()
         self._anim.setStartValue(self.maximumWidth())
         self._anim.setEndValue(self._PANEL_WIDTH)
         self._opacity_effect = QGraphicsOpacityEffect(self)
