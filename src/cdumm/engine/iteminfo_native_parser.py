@@ -696,7 +696,7 @@ def _read_PrefabDataTribe(r: _Reader, elem_index: int = 0, total_count: int = 1)
                 gvp_needle = b"\x00\x00\x80\x3f\x00\x00\x80\x3f\x00\x00\x80\x3f"
                 if r.data[r.pos + 8:r.pos + 20] != gvp_needle:
                     nearby = r.data.find(
-                        gvp_needle, r.pos, min(r.pos + 256, len(r.data))
+                        gvp_needle, r.pos, min(r.pos + 512, len(r.data))
                     )
                     if nearby > 0:
                         end = nearby - 8
@@ -757,7 +757,7 @@ def _read_PrefabDataTribe(r: _Reader, elem_index: int = 0, total_count: int = 1)
                     # If a needle exists nearby (within 256 bytes), forward
                     # walk to it.
                     nearby = r.data.find(
-                        gvp_needle, r.pos, min(r.pos + 256, len(r.data))
+                        gvp_needle, r.pos, min(r.pos + 512, len(r.data))
                     )
                     if nearby > 0:
                         end = nearby - 8
@@ -798,7 +798,7 @@ def _shapeA2_forward_walk(r: _Reader) -> dict | None:
     # SHAPE_A2_findings_v3 sample data; cap at 1500 bytes to avoid
     # latching onto the GVP of the NEXT record's PrefabData entry, which
     # would push parser cursor beyond the current record boundary).
-    scan_end = min(snap + 4096, len(r.data))
+    scan_end = min(snap + 1500, len(r.data))
     needle_pos = r.data.find(needle, snap, scan_end)
     if needle_pos < 0:
         return None
