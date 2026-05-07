@@ -581,6 +581,7 @@ class ConfigPanel(QWidget):
         self._preset_groups = dict(groups)
         button_group = QButtonGroup(self)
         button_group.setExclusive(True)
+        button_group.buttonClicked.connect(self._on_preset_selected)
         self._preset_radio_group = button_group
 
         row = QHBoxLayout()
@@ -609,6 +610,24 @@ class ConfigPanel(QWidget):
         container.setLayout(row)
         container.setStyleSheet("background: transparent;")
         self._body_layout.addWidget(container)
+
+    def _on_preset_selected(self, button) -> None:
+        """Apply the clicked preset's toggle state. Custom = no-op.
+
+        Looks up the clicked radio's tag in ``self._preset_groups`` and
+        sets every patch toggle to checked iff its index is in that
+        group's index list. The "Custom" radio means manual control —
+        we leave existing toggles alone so the user retains whatever
+        per-checkbox state they had.
+        """
+        tag = button.text()
+        if tag == "Custom":
+            return
+        if not self._preset_groups:
+            return
+        enable_indices = set(self._preset_groups.get(tag, []))
+        for idx, toggle in self._toggles.items():
+            toggle.setChecked(idx in enable_indices)
 
     def _add_section_header(self, text: str) -> None:
         header = CaptionLabel(text)
