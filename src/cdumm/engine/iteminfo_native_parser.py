@@ -1703,8 +1703,9 @@ def _read_item(r: _Reader) -> dict:
                 # writer detects and emits raw.
                 snap = r.pos
                 try:
-                    out[name] = r.carray(spec[2])
+                    parsed = r.carray(spec[2])
                 except Exception:
+                    parsed = None
                     r.pos = snap
                     opaque = _shapeA2_forward_walk(r)
                     if opaque is not None:
@@ -1716,6 +1717,81 @@ def _read_item(r: _Reader) -> dict:
                         # Re-raise original error
                         r.pos = snap
                         out[name] = r.carray(spec[2])
+                if parsed is not None:
+                    # Post-prefab boundary sanity check: even when the
+                    # carray returned without raising, the inner tribe
+                    # walk may have silently misaligned, leaving cursor
+                    # short of (or past) the real GVP boundary. The
+                    # next field (gimmick_visual_prefab_data_list) is a
+                    # carray with a u32 count; observed sane counts in
+                    # this dataset are 0..10. If we see a count well
+                    # above that, OR a non-zero count without the GVP
+                    # scale needle right after, the prefab path
+                    # misaligned. Try (1) the rec_end-bounded forward
+                    # walk to find a needle, and (2) when that fails,
+                    # a small-delta cursor adjustment proven by trial
+                    # parsing the rest of the schema to rec_end.
+                    suspicious = False
+                    if r.pos + 4 <= len(r.data):
+                        gvp_cnt = struct.unpack_from(
+                            "<I", r.data, r.pos
+                        )[0]
+                        if gvp_cnt > 100:
+                            suspicious = True
+                        elif gvp_cnt > 0 and not _looks_like_gvp_scale_needle(
+                            r.data, r.pos + 8
+                        ):
+                            # Non-zero count but no scale needle right
+                            # after: the GVP carray's first element
+                            # would be malformed. Misalignment.
+                            suspicious = True
+                    if suspicious:
+                        post_pos = r.pos
+                        r.pos = snap
+                        opaque = _shapeA2_forward_walk(r)
+                        if opaque is not None:
+                            out[name] = {
+                                "_opaque": True,
+                                "bytes": opaque["bytes"],
+                            }
+                        elif r.rec_end is not None:
+                            # Forward walk found no needle (record has
+                            # an empty GVP). Try a small-delta trial
+                            # parse: the prefab parser may have over-
+                            # or under-consumed by a few bytes due to
+                            # an unhandled tribe sub-shape. The tribe
+                            # data we already parsed isn't trustworthy,
+                            # so emit the entire prefab block as opaque.
+                            r.pos = snap
+                            delta = _trial_continue_to_rec_end(
+                                r.data, post_pos, r.rec_end, out
+                            )
+                            if delta is not None:
+                                end_pos = post_pos + delta
+                                if end_pos >= snap:
+                                    out[name] = {
+                                        "_opaque": True,
+                                        "bytes": bytes(
+                                            r.data[snap:end_pos]
+                                        ),
+                                    }
+                                    r.pos = end_pos
+                                else:
+                                    # Adjusted position would be before
+                                    # snap (impossible). Keep parsed.
+                                    r.pos = post_pos
+                                    out[name] = parsed
+                            else:
+                                # Trial parse found no valid delta;
+                                # keep the (misaligned) parse and let
+                                # downstream raise as before.
+                                r.pos = post_pos
+                                out[name] = parsed
+                        else:
+                            r.pos = post_pos
+                            out[name] = parsed
+                    else:
+                        out[name] = parsed
             else:
                 out[name] = r.carray(spec[2])
         elif kind == "struct":
@@ -1773,3 +1849,104 @@ def _write_item(w: _Writer, it: dict) -> None:
             _write_optional(w, v, spec[3])
         else:
             raise ValueError(f"unknown kind {kind!r} for field {name!r}")
+
+
+# Cache: fields that come AFTER prefab_data_list. Computed lazily.
+_FIELDS_AFTER_PREFAB: list | None = None
+
+
+def _fields_after_prefab() -> list:
+    global _FIELDS_AFTER_PREFAB
+    if _FIELDS_AFTER_PREFAB is None:
+        out = []
+        collect = False
+        for spec in _ITEM_FIELDS:
+            if collect:
+                out.append(spec)
+            if spec[0] == "prefab_data_list":
+                collect = True
+        _FIELDS_AFTER_PREFAB = out
+    return _FIELDS_AFTER_PREFAB
+
+
+def _trial_continue(data: bytes, start: int, rec_end: int,
+                    dsi_type: int) -> int:
+    """Trial-parse all post-prefab fields starting at ``start``.
+
+    Returns the final cursor position on success, -1 on any exception
+    or if the parse runs past ``rec_end``. Discards the parsed values.
+    Used by the post-prefab boundary sanity check to verify a candidate
+    cursor adjustment lands at exactly rec_end.
+    """
+    r = _Reader(data, start, rec_end=rec_end)
+    try:
+        for spec in _fields_after_prefab():
+            name, kind = spec[0], spec[1]
+            if kind == "u8":
+                r.u8()
+            elif kind == "u16":
+                r.u16()
+            elif kind == "u32":
+                r.u32()
+            elif kind == "u64":
+                r.u64()
+            elif kind == "i64":
+                r.i64()
+            elif kind == "f32":
+                r.f32()
+            elif kind == "cstring":
+                r.cstring()
+            elif kind == "localizable":
+                r.localizable()
+            elif kind == "carray_u8":
+                r.carray(_Reader.u8)
+            elif kind == "carray_u16":
+                r.carray(_Reader.u16)
+            elif kind == "carray_u32":
+                r.carray(_Reader.u32)
+            elif kind == "carray_cstring":
+                r.carray(_Reader.cstring)
+            elif kind == "carray":
+                r.carray(spec[2])
+            elif kind == "struct":
+                if name == "sharpness_data":
+                    _read_ItemInfoSharpnessData(r, dsi_type)
+                else:
+                    spec[2](r)
+            elif kind == "optional":
+                _read_optional(r, spec[2])
+            if r.pos > rec_end:
+                return -1
+        return r.pos
+    except Exception:
+        return -1
+
+
+def _trial_continue_to_rec_end(data: bytes, post_pos: int, rec_end: int,
+                                partial_out: dict) -> int | None:
+    """Find a small cursor delta s.t. the rest of the schema parses to
+    exactly rec_end.
+
+    The prefab parser may over- or under-consume by a few bytes when an
+    unhandled tribe sub-shape is silently misparsed. We try small deltas
+    around ``post_pos`` and pick whichever one lands the rest-of-schema
+    parse at ``rec_end``. Returns the delta (so the new cursor is
+    ``post_pos + delta``), or None when no delta in the search range
+    works.
+
+    The dsi (default_sub_item) field hasn't been parsed yet (it comes
+    after prefab), so we don't know the sharpness form. Try both.
+    """
+    # Search range: small bounded sweep around post_pos. Empirically
+    # the misalignment for the 64 silent-misalign records is exactly 2
+    # bytes, but allow a wider window for future variants. Try 0
+    # first (trivial: catches any case where the GVP cnt was bogus
+    # but the parse happens to land anyway).
+    for delta in (0, -2, 2, -4, 4, -1, 1, -3, 3, -6, 6, -8, 8):
+        ts = post_pos + delta
+        if ts < 0 or ts > rec_end:
+            continue
+        for dsi in (15, 0):
+            if _trial_continue(data, ts, rec_end, dsi) == rec_end:
+                return delta
+    return None
