@@ -676,6 +676,29 @@ def _read_PrefabDataTribe(r: _Reader, elem_index: int = 0, total_count: int = 1)
     # zero-discriminator only fits tribe[0] of single-tribe records.
     if elem_index > 0 or total_count > 1:
         return _read_PrefabDataTribe_shapeA(r)
+    # Shape A3 (cluster A from RESIDUAL_71_findings.md, 9 records keys
+    # 1001106..1001115). Fixed 150-byte tribe[0] starting with u16(0) +
+    # u32(list_a_count) where list_a_count is small (1..15). Pattern in
+    # bytes: 00 00 NN 00 00 00 with NN = la_count low byte. This must be
+    # checked BEFORE Shape A2 because Shape A2's discriminator can collide
+    # if first list_a entry's stat_key is also small. Without this, the
+    # records fall through to Shape B and get parsed bogusly. Route to
+    # the GVP forward-walk so the tribe is consumed opaquely.
+    if (
+        total_count == 1
+        and elem_index == 0
+        and r.data[r.pos] == 0
+        and r.data[r.pos + 1] == 0
+        and 1 <= r.data[r.pos + 2] <= 15
+        and r.data[r.pos + 3] == 0
+        and r.data[r.pos + 4] == 0
+        and r.data[r.pos + 5] == 0
+    ):
+        snap = r.pos
+        opaque = _shapeA2_forward_walk(r)
+        if opaque is not None:
+            return opaque
+        r.pos = snap
     if r.data[r.pos:r.pos + 4] == b"\x00\x00\x00\x00":
         # Family E (53 records): Shape A's list_a/list_b parses fine but
         # list_c carries FooterOuter-typed entries instead of TribeStat.
