@@ -428,7 +428,7 @@ LIST_WRITERS: dict[tuple[str, str], str] = {
     # Per-record dropset writer (CDUMM native parser).
     ("dropsetinfo", "drops"):
         "dropset_writer.build_drops_replacement_change",
-    # Iteminfo whole-table writer (vendored crimson_rs Rust extension).
+    # Iteminfo whole-table writer (CDUMM native parser).
     # The full list of iteminfo list-of-dict fields the writer
     # accepts is in `iteminfo_writer.SUPPORTED_FIELDS`. We mirror the
     # commonly-used ones here so validation accepts them; the writer
