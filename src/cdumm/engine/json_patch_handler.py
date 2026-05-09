@@ -201,8 +201,18 @@ def is_natt_format_3(path: Path) -> bool:
     A Format 3 file:
       - is a JSON dict at the top level
       - has ``"format": 3``
-      - has ``"intents"`` as a list (at least one intent)
-      - has ``"target"`` as a string (the .pabgb file to modify)
+      - matches one of two dialects defined by the spec:
+          singular: ``"target"`` (string) + ``"intents"`` (list)
+          plural:   ``"targets"`` (non-empty list)
+
+    Bug 2026-05-08 (jhs9354 on Nexus, mod 725): the singular-only
+    detector silently rejected the plural dialect. Mods that
+    bundled multiple .pabgb targets in one file (or shipped a
+    sibling file in plural shape) routed past the Format 3 branch
+    and fell through as "no recognized format". The plural shape
+    is already parsed correctly downstream by
+    ``format3_handler.parse_format3_mod_targets``; the detector
+    just had to learn about it.
     """
     try:
         if not path.is_file() or path.suffix.lower() != ".json":
@@ -215,12 +225,15 @@ def is_natt_format_3(path: Path) -> bool:
             data = json.load(f)
     except (OSError, ValueError, UnicodeDecodeError):
         return False
-    return (
-        isinstance(data, dict)
-        and data.get("format") == 3
-        and isinstance(data.get("intents"), list)
-        and isinstance(data.get("target"), str)
-    )
+    if not isinstance(data, dict) or data.get("format") != 3:
+        return False
+    if (isinstance(data.get("target"), str)
+            and isinstance(data.get("intents"), list)):
+        return True
+    targets = data.get("targets")
+    if isinstance(targets, list) and len(targets) > 0:
+        return True
+    return False
 
 
 def detect_json_patches_all(path: Path) -> list[dict]:
