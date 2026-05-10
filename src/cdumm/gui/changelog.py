@@ -18,6 +18,14 @@ _UNRELEASED_NOTES: list[str] = []
 
 CHANGELOG = [
     {
+        "version": "3.3.1",
+        "date": "2026-05-10",
+        "notes": [
+            "<b>Hotfix: companion .asi plugins bundled with variant-pack mods now actually land in bin64.</b> The v3.2.16 variant-pack picker (Character Creator and similar layouts) collected sibling .asi files from the extracted archive into a pending list so they could be installed alongside whichever body type the user picked. The post-import handler then deleted the archive's pre-extract temp directory at the very top of its work, before reaching the ASI install loop further down. By the time the loop tried to copy <code>CharacterCreatorHead.asi</code> into <code>bin64\\\\</code>, the staged path no longer existed on disk and every <code>p.exists()</code> check returned false, so the .asi was silently skipped. The post-import banner read \"imported\" with no plugin count, the ASI Mods tab stayed empty, and the in-game features that depended on the plugin never worked. Cleanup of the pre-extract directory is now deferred to AFTER the ASI install loop runs, so the staged plugins survive long enough to be copied. Caught and patched by Democles85 (PR #86).",
+            "<b>Format 3 mods that target <code>enchant_data_list</code> on iteminfo now report a clear skip reason instead of silently saying \"0 byte changes\".</b> v3.2.16 added an additive-write branch that accepted intents adding a list field to a record that didn't already carry it (e.g. adding enchants to an item with no enchants in vanilla). The branch reached the parsed-record dict but the native parser's serializer walks a fixed schema list that does not include <code>enchant_data_list</code> (the live binary's EnchantData layout has not been reverse-engineered). The new key was silently dropped on serialise, the resulting bytes equalled vanilla, and the apply pipeline reported \"0 byte changes\" with no useful explanation. The writer now skips <code>enchant_data_list</code> intents up front with a log line that names the field and explains it is not currently writeable, so the user understands the failure mode instead of guessing. Real EnchantData support is on the queue and will lift this restriction when the schema entry plus paired read/write round-trip lands. UnLuckyLust on GitHub #79 reported v3.2.16 still produced \"0 byte changes\" against a buff-adding mod targeting Axiom Bracelet.",
+        ],
+    },
+    {
         "version": "3.3.0",
         "date": "2026-05-10",
         "notes": [
