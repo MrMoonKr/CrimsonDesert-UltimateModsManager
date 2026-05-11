@@ -4733,37 +4733,56 @@ class CdummWindow(FluentWindow):
             # nexus_mod_id so the red "Click To Update" pill turns
             # green immediately, instead of waiting up to 30 minutes
             # for the next background update check.
-            if nexus_id and hasattr(self, "_nexus_updates") \
-                    and self._nexus_updates:
+            #
+            # Faisal 2026-05-11 robustness: when the dropped filename
+            # does not parse a nexus_id (user dragged a renamed file,
+            # or a non-Nexus build) but the existing row already had
+            # nexus_mod_id stored from a prior import, fall back to
+            # the row's stored value. Without this the pill stays RED
+            # on every update-by-rename-and-drop until the next 30-min
+            # poll, even though the row IS now on the latest. Mirrors
+            # the fix in _store_nexus_metadata_on_row for variant mods.
+            if hasattr(self, "_nexus_updates") and self._nexus_updates:
+                effective_nid = nexus_id
                 try:
-                    from cdumm.engine.nexus_api import clear_outdated_after_update
-                    # clear_outdated_after_update(updates, nexus_mod_id, new_version)
-                    # — pass the just-imported version (parsed from the
-                    # Nexus filename, falls back to whatever local row
-                    # has) so the GREEN pill carries an accurate
-                    # version label.
-                    new_ver = (nexus_file_ver or "").strip()
-                    if not new_ver:
-                        try:
-                            row = self._db.connection.execute(
-                                "SELECT version FROM mods WHERE id = ?",
-                                (_pid,)).fetchone()
-                            new_ver = (row[0] if row and row[0] else "").strip()
-                        except Exception:
-                            new_ver = ""
-                    self._nexus_updates = clear_outdated_after_update(
-                        self._nexus_updates, int(nexus_id), new_ver)
-                    if hasattr(self, 'paz_mods_page'):
-                        self.paz_mods_page.set_nexus_updates(
-                            self._nexus_updates)
-                    if hasattr(self, 'asi_plugins_page'):
-                        try:
-                            self.asi_plugins_page.set_nexus_updates(
+                    if not effective_nid:
+                        row = self._db.connection.execute(
+                            "SELECT nexus_mod_id FROM mods WHERE id = ?",
+                            (_pid,)).fetchone()
+                        if row and row[0]:
+                            effective_nid = int(row[0])
+                except Exception:
+                    pass
+                if effective_nid:
+                    try:
+                        from cdumm.engine.nexus_api import clear_outdated_after_update
+                        # clear_outdated_after_update(updates, nexus_mod_id, new_version)
+                        # — pass the just-imported version (parsed from the
+                        # Nexus filename, falls back to whatever local row
+                        # has) so the GREEN pill carries an accurate
+                        # version label.
+                        new_ver = (nexus_file_ver or "").strip()
+                        if not new_ver:
+                            try:
+                                row = self._db.connection.execute(
+                                    "SELECT version FROM mods WHERE id = ?",
+                                    (_pid,)).fetchone()
+                                new_ver = (row[0] if row and row[0] else "").strip()
+                            except Exception:
+                                new_ver = ""
+                        self._nexus_updates = clear_outdated_after_update(
+                            self._nexus_updates, int(effective_nid), new_ver)
+                        if hasattr(self, 'paz_mods_page'):
+                            self.paz_mods_page.set_nexus_updates(
                                 self._nexus_updates)
-                        except AttributeError:
-                            pass
-                except Exception as e:
-                    logger.debug("pill-clear failed: %s", e)
+                        if hasattr(self, 'asi_plugins_page'):
+                            try:
+                                self.asi_plugins_page.set_nexus_updates(
+                                    self._nexus_updates)
+                            except AttributeError:
+                                pass
+                    except Exception as e:
+                        logger.debug("pill-clear failed: %s", e)
 
             # Post-import: store original drop name + extract version
             try:
