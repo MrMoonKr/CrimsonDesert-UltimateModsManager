@@ -463,11 +463,24 @@ def main() -> int:
         splash.close()
         from cdumm.gui.setup_dialog import SetupDialog
         dialog = SetupDialog()
-        if dialog.exec() and dialog.game_directory:
-            game_dir = str(dialog.game_directory)
+        dialog_result = dialog.exec()
+        gd_property = dialog.game_directory
+        if dialog_result and gd_property:
+            game_dir = str(gd_property)
             logger.info("Game directory configured: %s", game_dir)
         else:
-            logger.warning("No game directory selected, exiting")
+            # Faisal 2026-05-12 GitHub #104 (Ze-del) and #106 (GoGOD7):
+            # multiple users reported the wizard accepts a valid path
+            # (green "Valid Crimson Desert installation found") then
+            # CDUMM exits on OK click. Log which of the two conditions
+            # tripped so the next bundle tells me whether the dialog
+            # returned Rejected (Qt-side mystery) or game_directory was
+            # None (signal-binding race in SetupDialog). Without this
+            # split the warning alone cannot tell me where to look.
+            logger.warning(
+                "No game directory selected, exiting "
+                "(dialog_result=%r, game_directory=%r)",
+                dialog_result, gd_property)
             return 1
         splash = show_splash()
         app.processEvents()
