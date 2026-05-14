@@ -1630,9 +1630,25 @@ class ConfigPanel(QWidget):
         text_col.setSpacing(2)
 
         # Title — plain QLabel inherits ConfigPanel's QLabel color.
+        # GitHub #112 Inosakiii: long variant labels (e.g. mutex preset
+        # mods that ship "<source_filename> -> <dest_filename>" as the
+        # label) get truncated at the default panel width even with
+        # wordWrap on. Two fixes here:
+        #   1. setSizePolicy(Preferred, Minimum + heightForWidth) so
+        #      the label grows tall enough to fit the wrapped text
+        #      instead of clipping rows.
+        #   2. setToolTip(full label) so even if the label is still
+        #      cut off (very narrow panel, very long string) the
+        #      user can hover to read the full text.
+        from PySide6.QtWidgets import QSizePolicy
         title_lbl = QLabel(variant.get("label", ""))
         title_lbl.setWordWrap(True)
         title_lbl.setMinimumWidth(1)
+        sp = QSizePolicy(QSizePolicy.Policy.Preferred,
+                         QSizePolicy.Policy.MinimumExpanding)
+        sp.setHeightForWidth(True)
+        title_lbl.setSizePolicy(sp)
+        title_lbl.setToolTip(variant.get("label", ""))
         tf = title_lbl.font()
         tf.setPixelSize(14)
         tf.setWeight(QFont.Weight.DemiBold)
