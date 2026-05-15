@@ -4480,15 +4480,55 @@ def _process_extracted_files(
         # loose DDS, a weird JSON schema, etc.
         counts: dict[str, int] = {}
         total = 0
+        json_files: list[Path] = []
         for p in extracted_dir.rglob("*"):
             if p.is_file():
                 total += 1
                 ext = p.suffix.lower() or "(no-ext)"
                 counts[ext] = counts.get(ext, 0) + 1
+                if ext == ".json":
+                    json_files.append(p)
                 if total > 500:  # cap so huge folders don't stall
                     break
         summary = ", ".join(f"{n} {ext}" for ext, n in sorted(
             counts.items(), key=lambda kv: -kv[1])[:6])
+
+        # 2026-05-16: Double Resource Buff Effect Field JSON v2 (Nexus
+        # 2276) shipped with missing commas between intent objects in
+        # the targets[].intents[] array. Every Format 3 detector and
+        # JSON-patch detector failed at json.load() and returned None,
+        # so the import fell through to this generic "unrecognised
+        # format" error. The mod author needed to know their JSON was
+        # malformed, not that CDUMM did not support their format.
+        # When the drop is JSON-only (no other recognised content) and
+        # every .json fails to parse, surface the parse error with the
+        # exact line/column so the mod author can fix it.
+        import json as _json
+        if json_files and total == len(json_files):
+            parse_errors: list[str] = []
+            for jp in json_files[:5]:
+                try:
+                    with open(jp, "r", encoding="utf-8-sig") as _f:
+                        _json.load(_f)
+                except _json.JSONDecodeError as _e_json:
+                    parse_errors.append(
+                        f"  {jp.name}: line {_e_json.lineno}, "
+                        f"col {_e_json.colno}: {_e_json.msg}")
+                except (OSError, UnicodeDecodeError) as _e_io:
+                    parse_errors.append(f"  {jp.name}: {_e_io}")
+            if parse_errors and len(parse_errors) == len(json_files[:5]):
+                detail = "\n".join(parse_errors)
+                result.error = (
+                    f"This archive ships {len(json_files)} JSON "
+                    f"file(s) but none of them parsed as valid JSON. "
+                    f"The mod author likely typed the JSON by hand and "
+                    f"missed a comma, bracket, or quote. Run the file "
+                    f"through a JSON validator (e.g. jsonlint.com) and "
+                    f"share these line numbers with the author:\n"
+                    f"{detail}"
+                )
+                return result
+
         result.error = (
             "This doesn't look like a CDUMM-supported mod. No PAZ/PAMT "
             "files, no valid JSON patch, no recognised Crimson Browser "
