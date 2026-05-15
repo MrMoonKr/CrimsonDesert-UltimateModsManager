@@ -542,8 +542,20 @@ class ModManager:
                     shutil.rmtree(entry, ignore_errors=True)
                     logger.info("Cleaned up orphaned source folder: %s", entry.name)
 
-        # Remove zombie mods (0 deltas, disabled, no json_source — from failed imports)
-        # Exclude JSON mods which use mount-time patching (json_source) instead of deltas
+        # Remove zombie mods (0 deltas, disabled, no json_source, no archived
+        # source folder — from genuinely failed imports that left nothing
+        # behind to recover).
+        #
+        # xenoi60 GitHub #132: the previous predicate ('disabled + 0 deltas
+        # + no json_source') also nuked legitimately-imported CB / loose-file
+        # mods that happen to land with 0 deltas (e.g. CB handler detects 1
+        # file but the byte-level diff is empty because the mod's payload
+        # matches vanilla on the targeted offset, or the user has not run
+        # Apply yet on a PAZ-replacement mod that only generates deltas at
+        # apply time). Those mods DO have an archived source folder under
+        # ``sources/<mod_id>/`` and the user can still apply / reimport
+        # them. Adding the 'no source folder on disk' condition keeps the
+        # cleanup focused on truly orphaned rows.
         zombies = self._db.connection.execute(
             "SELECT m.id, m.name FROM mods m "
             "WHERE m.enabled = 0 "
@@ -551,12 +563,29 @@ class ModManager:
             "AND NOT EXISTS "
             "(SELECT 1 FROM mod_deltas md WHERE md.mod_id = m.id)"
         ).fetchall()
+        sources_root = self._deltas_dir.parent / "sources"
+        kept_with_source: list[str] = []
+        true_zombies: list[tuple[int, str]] = []
         for mod_id, name in zombies:
+            src_dir = sources_root / str(mod_id)
+            if src_dir.exists() and any(src_dir.iterdir()):
+                kept_with_source.append(f"{name} (id={mod_id})")
+                continue
+            true_zombies.append((mod_id, name))
+        for mod_id, name in true_zombies:
             self._db.connection.execute("DELETE FROM mods WHERE id = ?", (mod_id,))
-            logger.info("Removed zombie mod (0 deltas, disabled): %s (id=%d)", name, mod_id)
-        if zombies:
+            logger.info("Removed zombie mod (0 deltas, disabled, no source): %s (id=%d)", name, mod_id)
+        if true_zombies:
             self._db.connection.commit()
-            logger.info("Cleaned up %d zombie mod(s)", len(zombies))
+            logger.info("Cleaned up %d zombie mod(s)", len(true_zombies))
+        if kept_with_source:
+            logger.info(
+                "Preserved %d mod(s) with 0 deltas because their source "
+                "folder still exists: %s",
+                len(kept_with_source),
+                ", ".join(kept_with_source[:5]) + (
+                    f", +{len(kept_with_source) - 5} more"
+                    if len(kept_with_source) > 5 else ""))
 
         # Remove duplicate mods (same name, keep highest priority / newest)
         dupes = self._db.connection.execute(
