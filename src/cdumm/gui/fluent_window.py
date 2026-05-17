@@ -3997,7 +3997,42 @@ class CdummWindow(FluentWindow):
                             logger.warning(
                                 "Single-select companion ASI install failed: %s",
                                 _e_asi)
-                    path = selected[0][0]
+                    # Use the FILTERED data, not the original JSON file.
+                    # When the user picked a preset in TogglePickerDialog,
+                    # selected[0][1] holds the filtered subset; the
+                    # original path on disk still has every preset's
+                    # patches, so feeding the worker the path would
+                    # silently undo the user's pick. Reported by Zowbaid
+                    # on GitHub #92 ("after the mod pops up in the UI and
+                    # I press the Cog icon, it still shows all other
+                    # presets as enabled"). Write the filtered data to a
+                    # temp .json and feed THAT path to the worker so the
+                    # imported mod's source matches what the user picked.
+                    _orig_path = selected[0][0]
+                    _filtered_data = selected[0][1]
+                    try:
+                        import json as _json
+                        import tempfile as _tempfile
+                        # Put the temp file in a dedicated dir so the
+                        # filename CDUMM stores as drop_name is the
+                        # original (e.g. "More Inventory.json"), not a
+                        # mangled tmp name.
+                        _filt_dir = Path(_tempfile.mkdtemp(
+                            prefix="cdumm_filtered_"))
+                        _filt_path = _filt_dir / _orig_path.name
+                        with _filt_path.open("w", encoding="utf-8") as _fh:
+                            _json.dump(_filtered_data, _fh, indent=2)
+                        path = _filt_path
+                        logger.info(
+                            "Preset pick: wrote filtered JSON for '%s' "
+                            "(%d patches kept)",
+                            _orig_path.name,
+                            len(_filtered_data.get("patches", [])))
+                    except Exception as _e_w:
+                        logger.warning(
+                            "Could not write filtered preset JSON, "
+                            "falling back to original path: %s", _e_w)
+                        path = _orig_path
                 else:
                     self._configurable_source = None
                     if tmp_extract:
