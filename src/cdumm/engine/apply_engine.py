@@ -2512,24 +2512,59 @@ class ApplyWorker(QObject):
             except Exception as _e:
                 logger.debug("protected_external_dirs lookup failed: %s", _e)
 
-            for d in sorted(self._game_dir.iterdir()):
-                if not d.is_dir() or not d.name.isdigit() or len(d.name) != 4:
-                    continue
-                if int(d.name) < 36:
-                    continue
+            # GitHub #83 mrkillerhomerxD reported HAWT's 0036 still being
+            # deleted on v3.3.6 even after the externally-managed-dir
+            # protection landed. Add INFO logging at every decision branch
+            # so the next bundle from a hit reveals which path fired.
+            candidate_dirs = sorted(
+                d for d in self._game_dir.iterdir()
+                if d.is_dir() and d.name.isdigit() and len(d.name) == 4
+                and int(d.name) >= 36
+            )
+            if candidate_dirs:
+                logger.info(
+                    "Orphan-cleanup scan: %d candidate dir(s) found at "
+                    ">=0036; enabled_dirs=%s, user_protected=%s",
+                    len(candidate_dirs),
+                    sorted(enabled_dirs), sorted(user_protected))
+            for d in candidate_dirs:
                 if d.name in enabled_dirs:
+                    logger.info(
+                        "Orphan-cleanup: %s is in enabled_dirs, skip",
+                        d.name)
                     continue
                 if d.name in user_protected:
                     logger.info(
                         "Skipping orphan cleanup for user-protected dir: %s",
                         d.name)
                     continue
-                # Externally-managed dirs have a valid 0.pamt file. Keep
-                # those even though they aren't in our snapshot.
-                if (d / "0.pamt").exists():
+                # Externally-managed dirs carry a .pamt + .paz pair on
+                # disk. Originally the check was only ``0.pamt`` which
+                # missed setups where the external tool numbered its
+                # files differently (1.pamt, etc.) or wrote a .paz first
+                # with the .pamt landing a moment later. Widen the check
+                # to "any .pamt OR .paz file in the dir" — if anything
+                # PAZ-shaped sits there, some other tool owns the slot
+                # and we must not delete it.
+                try:
+                    has_paz_artifacts = any(
+                        c.suffix.lower() in (".pamt", ".paz")
+                        for c in d.iterdir()
+                    )
+                except OSError as _e:
+                    logger.warning(
+                        "Orphan-cleanup: could not list %s, treating "
+                        "as protected to be safe: %s", d.name, _e)
+                    has_paz_artifacts = True
+                if has_paz_artifacts:
+                    contents = []
+                    try:
+                        contents = sorted(c.name for c in d.iterdir())
+                    except OSError:
+                        pass
                     logger.info(
                         "Skipping orphan cleanup for externally-managed "
-                        "dir (has 0.pamt): %s", d.name)
+                        "dir %s (contents: %s)", d.name, contents)
                     continue
                 # Check if directory is in snapshot (vanilla)
                 snap_check = self._db.connection.execute(
@@ -2539,7 +2574,14 @@ class ApplyWorker(QObject):
                 if snap_check == 0:
                     import shutil
                     shutil.rmtree(d, ignore_errors=True)
-                    logger.info("Cleaned up orphan directory during apply: %s", d.name)
+                    logger.info(
+                        "Cleaned up orphan directory during apply: %s "
+                        "(not in snapshot, no PAZ artifacts present)",
+                        d.name)
+                else:
+                    logger.info(
+                        "Orphan-cleanup: %s is in vanilla snapshot, keep",
+                        d.name)
 
             papgt_mgr = PapgtManager(self._game_dir, self._vanilla_dir)
             try:
@@ -4805,10 +4847,23 @@ class RevertWorker(QObject):
                         "Fix Everything: keeping user-protected dir %s",
                         d.name)
                     continue
-                if (d / "0.pamt").exists():
+                # Same widened check as the apply path (#83): any
+                # .pamt or .paz artifact in the dir means an external
+                # tool owns the slot and we must not delete it.
+                try:
+                    has_paz_artifacts = any(
+                        c.suffix.lower() in (".pamt", ".paz")
+                        for c in d.iterdir()
+                    )
+                except OSError as _e:
+                    logger.warning(
+                        "Fix Everything: could not list %s, keeping "
+                        "to be safe: %s", d.name, _e)
+                    has_paz_artifacts = True
+                if has_paz_artifacts:
                     logger.info(
-                        "Fix Everything: keeping externally-managed dir "
-                        "%s (has 0.pamt)", d.name)
+                        "Fix Everything: keeping externally-managed "
+                        "dir %s (has PAZ artifacts)", d.name)
                     continue
                 # Check if this directory is in the snapshot (vanilla)
                 snap_check = self._db.connection.execute(

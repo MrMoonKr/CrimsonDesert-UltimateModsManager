@@ -1867,16 +1867,15 @@ class CdummWindow(FluentWindow):
             # Faisal 2026-05-12 GitHub #108 (jscouron) and #109
             # (Dragoon853): three users reported CDUMM crashing or
             # freezing the moment the in-app update download reached
-            # 100%. The crash signature suggests one of the three
-            # post-download calls below was raising unhandled: the
-            # StateToolTip teardown, the InfoBar.success creation, or
-            # the file-manager reveal. Each call is now wrapped in
-            # its own try/except so a failure in one cannot crash the
-            # whole app or leave the StateToolTip stuck at 100%.
-            # Also explicitly close the tooltip (matches _on_failed)
-            # so it does not linger on screen indefinitely on certain
-            # qfluentwidgets versions where setState(True) alone
-            # leaves the tooltip visible.
+            # 100%. The v3.3.4 try/except wrapping fixed the crash
+            # path, but jscouron and ZapZockt reported a fresh hang
+            # on v3.3.6 ("not responding forever" after download
+            # completes). The likely culprit is the file-manager
+            # reveal subprocess somehow blocking the GUI thread.
+            # Defer it to a QTimer.singleShot(50, ...) so the
+            # InfoBar.success paints first and any subprocess
+            # weirdness can't wedge the post-download return.
+            logger.info("Update download complete: %s", path)
             if tip is not None:
                 try:
                     tip.setState(True)
@@ -1893,13 +1892,26 @@ class CdummWindow(FluentWindow):
                     duration=8000, position=InfoBarPosition.TOP, parent=self)
             except Exception as e:
                 logger.debug("downloaded InfoBar failed: %s", e)
+
+            def _deferred_reveal() -> None:
+                logger.info(
+                    "Deferred reveal-in-file-manager firing for: %s",
+                    path)
+                try:
+                    self._reveal_in_file_manager(path)
+                except Exception as e:
+                    logger.warning(
+                        "Reveal-in-file-manager raised after update "
+                        "download finished (file %r is still saved): %s",
+                        path, e)
+                logger.info("Deferred reveal-in-file-manager returned")
             try:
-                self._reveal_in_file_manager(path)
+                QTimer.singleShot(50, _deferred_reveal)
             except Exception as e:
                 logger.warning(
-                    "Reveal-in-file-manager raised after update "
-                    "download finished (file %r is still saved): %s",
-                    path, e)
+                    "QTimer.singleShot for reveal failed, calling "
+                    "synchronously: %s", e)
+                _deferred_reveal()
 
         def _on_failed(reason: str) -> None:
             if tip is not None:
@@ -1940,18 +1952,46 @@ class CdummWindow(FluentWindow):
 
         Linux / fallback: just open the parent folder via ``open_path``,
         because xdg-open has no portable "select" verb.
+
+        GitHub #108 (jscouron, ZapZockt): on Windows the spawn must be
+        fully detached so explorer.exe can't share stdio handles with
+        CDUMM. Without DETACHED_PROCESS, certain antivirus / shell
+        extensions hold the explorer subprocess open long enough that
+        if the caller is on the GUI thread, the GUI can appear to hang
+        (sized to caller's expectations) even though Popen returned.
         """
         from pathlib import Path
         import subprocess
         p = Path(path)
         try:
             if IS_WINDOWS:
+                # CREATE_NO_WINDOW alone is not enough to fully detach
+                # explorer.exe from the parent. Add DETACHED_PROCESS
+                # and explicit stdio=DEVNULL to break every shared
+                # handle so explorer cannot influence CDUMM's
+                # event loop.
+                DETACHED_PROCESS = 0x00000008
+                creationflags = (
+                    subprocess.CREATE_NO_WINDOW
+                    | DETACHED_PROCESS
+                    | subprocess.CREATE_NEW_PROCESS_GROUP
+                )
                 subprocess.Popen(
                     ["explorer.exe", f"/select,{p}"],
-                    **subprocess_no_window_kwargs())
+                    creationflags=creationflags,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    close_fds=True,
+                )
                 return
             if IS_MACOS:
-                subprocess.Popen(["open", "-R", str(p)])
+                subprocess.Popen(
+                    ["open", "-R", str(p)],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
                 return
         except Exception as e:
             logger.debug("reveal-in-file-manager failed: %s", e)
