@@ -19,6 +19,14 @@ _UNRELEASED_NOTES: list[str] = [
 
 CHANGELOG = [
     {
+        "version": "3.3.10",
+        "date": "2026-05-20",
+        "notes": [
+            "<b>Mesh and texture mods that wrap their files in a gamedata/ folder now import without needing a manual rename.</b> Axlred GitHub #146 reported that mods like Nexus 1430 and 2130 would not import unless the user renamed the mod's gamedata/ folder to files/. Root cause: when CDUMM walks a dropped folder it builds candidate paths by stripping one leading directory at a time, then checked each candidate against the vanilla snapshot AND a game-file regex, breaking on the first hit. For a mesh file at gamedata/character/model/.../foo.pac the gamedata-prefixed candidate matched the regex first, so the file imported as a brand-new file at gamedata/character/... and the real vanilla character/... file was never replaced. The matcher now does two passes: first it tries the snapshot exact-match for every candidate slice, so the correctly-stripped path that names a real vanilla file always wins, then it falls back to the regex only for genuinely new files. This is wrapper-name-agnostic, so gamedata/, files/, game_files/, or any nesting all strip correctly.",
+            "<b>Importing a texture pack that exceeds 4 GB now gives a clear error instead of an opaque worker crash.</b> mrkillerhomerxD GitHub #148 reported that importing HD Upscale x2 (Nexus 2618) failed with the cryptic message 'Worker crashed: I format requires 0 <= number <= 4294967295'. HD Upscale roughly 8x's every object texture, which pushes the object-texture PAZ archive past 4 GB. The PAMT record stores file offsets and sizes as 32-bit values, so any offset above 4 GB cannot be written and the underlying struct call raised. The 4 GB ceiling is a hard limit of Crimson Desert's archive format, the game itself cannot load a PAZ larger than that. CDUMM now detects the overflow before it happens and raises a clear message naming the mod and explaining the limit, so the user knows to use a lower-resolution variant rather than seeing a generic crash.",
+        ],
+    },
+    {
         "version": "3.3.9",
         "date": "2026-05-20",
         "notes": [
